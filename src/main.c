@@ -24,10 +24,14 @@
 #include "usart.h"
 #include "gpio.h"
 #include "oled.h"
+#include "show.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "delay.h"
 
+/* Motor control variables */
+extern TIM_HandleTypeDef htim4;  /* PWMB on PB1 - TIM4_CH2 */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -77,7 +81,8 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-
+  /* Initialize delay function (SYSCLK = 72MHz) */
+  delay_init(72);
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -96,7 +101,22 @@ int main(void)
   MX_TIM1_Init();
   MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
+  
+  /* Wait for GPIO to stabilize */
+  delay_ms(200);
+  
+  /* Initialize OLED display - with extra debug delays */
   OLED_Init();
+  
+  /* Wait for OLED to fully initialize and reset */
+  delay_ms(1000);
+  
+  /* Clear display */
+  OLED_Clear();
+  
+  /* Wait for clear to complete */
+  delay_ms(200);
+  
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -106,8 +126,67 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	  OLED_Clear();
-	  oled_show();
+    
+    /* ===== OLED Test Pattern 1: Text Display ===== */
+    OLED_Clear();
+    delay_ms(100);
+    OLED_ShowString(0, 0, (uint8_t*)"OLED TEST");
+    OLED_ShowString(0, 2, (uint8_t*)"Display: ON");
+    OLED_ShowString(0, 4, (uint8_t*)"I2C: 0x78");
+    OLED_ShowString(0, 6, (uint8_t*)"SSD1306");
+    delay_ms(2000);
+
+    /* ===== OLED Test Pattern 2: Different Text ===== */
+    OLED_Clear();
+    delay_ms(100);
+    OLED_ShowString(0, 1, (uint8_t*)"STM32F103C8");
+    OLED_ShowString(0, 3, (uint8_t*)"Testing...");
+    OLED_ShowString(0, 5, (uint8_t*)"Pattern 2");
+    delay_ms(2000);
+
+    /* ===== OLED Test Pattern 3: Number Display ===== */
+    OLED_Clear();
+    delay_ms(100);
+    OLED_ShowString(0, 0, (uint8_t*)"Counter:");
+    for(uint8_t i = 0; i < 16; i++)
+    {
+      OLED_ShowNumber(80, 0, i, 2, 16);
+      delay_ms(300);
+    }
+
+    /* ===== OLED Test Pattern 4: Clear screen ===== */
+    OLED_Clear();
+    delay_ms(2000);  /* Show black screen for 2 seconds */
+
+    /* ===== OLED Test Pattern 5: All pixels ON ===== */
+    for(uint16_t x = 0; x < 128; x++)
+    {
+      for(uint8_t y = 0; y < 64; y++)
+      {
+        OLED_DrawPoint(x, y, 1);
+      }
+    }
+    OLED_Refresh_Gram();
+    delay_ms(2000);  /* Show filled screen for 2 seconds */
+
+    /* ===== OLED Test Pattern 6: Checkerboard ===== */
+    OLED_Clear();
+    for(uint16_t x = 0; x < 128; x += 2)
+    {
+      for(uint8_t y = 0; y < 64; y += 2)
+      {
+        OLED_DrawPoint(x, y, 1);
+      }
+    }
+    OLED_Refresh_Gram();
+    delay_ms(2000);
+
+    /* ===== OLED Test Pattern 7: Back to text ===== */
+    OLED_Clear();
+    delay_ms(100);
+    OLED_ShowString(0, 2, (uint8_t*)"All Tests Done!");
+    OLED_ShowString(0, 4, (uint8_t*)"Looping...");
+    delay_ms(1000);
   }
   /* USER CODE END 3 */
 }

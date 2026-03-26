@@ -1,5 +1,6 @@
 
 #include "show.h"
+#include "oled.h"
 unsigned char i,temp;          //��������
 unsigned char Send_Count; //������Ҫ���͵����ݸ���
 float Vol;
@@ -15,7 +16,7 @@ void oled_show(void)
 	//OLED_ShowString(00,00,"Alastair!");
 
 		//=============��1����ʾ�Ƕ�PD����P����Position_KP=======================//	
-		OLED_ShowString(00,00,"B-KP");
+		OLED_ShowString(00,00,(const uint8_t *)"B-KP");
 		/*
 		OLED_ShowNumber(40,00,Balance_KP,3,12);
 		OLED_ShowString(57,00,"."),  

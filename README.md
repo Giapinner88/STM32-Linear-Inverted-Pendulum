@@ -22,33 +22,25 @@ Inspired by [playfultechnology/pid-invertedpendulum](https://github.com/playfult
 
 ## What this repo contains
 
-The project under `project/` is a STM32CubeIDE HAL project with all hardware drivers configured and ready. It compiles and flashes cleanly. The control loop itself (`User/control/`) is intentionally left empty — that is where custom algorithms go.
+This repository is now organized in **PlatformIO standard layout**.
 
 ```
-project/
-├── Core/
-│   ├── Src/
-│   │   ├── main.c              # entry point, hardware init
-│   │   ├── adc.c               # angle sensor (WDD35D4 potentiometer)
-│   │   ├── tim.c               # PWM output + 5 ms timer interrupt
-│   │   ├── usart.c             # UART debug output
-│   │   ├── gpio.c              # buttons, LEDs
-│   │   ├── i2c.c               # OLED communication
-│   │   └── stm32f1xx_it.c      # interrupt handlers
-│   ├── Inc/                    # corresponding headers
-│   └── Startup/
-│       └── startup_stm32f103c8tx.s
-├── Hardware/
-│   └── OLED/                   # oled.c, oled.h, oledfont.h
-├── System/
-│   └── delay/                  # delay.c, delay.h
-├── User/
-│   └── show/                   # OLED display layout (show.c, show.h)
-├── Drivers/
-│   ├── STM32F1xx_HAL_Driver/   # ST HAL library
-│   └── CMSIS/                  # ARM core headers
-├── InvertedPendulum.ioc        # STM32CubeMX configuration
-└── STM32F103C8TX_FLASH.ld      # linker script
+.
+├── platformio.ini
+├── src/                        # STM32Cube generated application sources
+│   ├── main.c                  # entry point, hardware init
+│   ├── adc.c                   # angle sensor (WDD35D4 potentiometer)
+│   ├── tim.c                   # PWM output + 5 ms timer interrupt
+│   ├── usart.c                 # UART debug output
+│   ├── gpio.c                  # buttons, LEDs
+│   ├── i2c.c                   # OLED communication
+│   └── stm32f1xx_it.c          # interrupt handlers
+├── include/                    # STM32Cube generated headers (main.h, tim.h, ...)
+├── lib/
+│   ├── OLED/src/               # oled.c, oled.h, oledfont.h
+│   ├── delay/src/              # delay.c, delay.h
+│   └── show/src/               # show.c, show.h, control.c
+└── project/                    # CubeMX/CubeIDE reference files (.ioc, linker, Drivers)
 ```
 
 The 5 ms control interrupt fires in `stm32f1xx_it.c`. All sensor reads and motor output happen there. Reading the angle and position, and writing the PWM, requires only standard HAL calls:
@@ -85,15 +77,17 @@ The OLED screen shows live sensor readings during this process — ADC (angle), 
 ## Getting started
 
 **Requirements:**
-- [STM32CubeIDE](https://www.st.com/en/development-tools/stm32cubeide.html) (free, no size limit)
-- ST-Link v2 USB programmer
-- ST-Link driver
+- [PlatformIO Core](https://docs.platformio.org/en/latest/core/installation/index.html) or VS Code + PlatformIO IDE extension
+- ST-Link v2 USB programmer (or serial uploader if configured)
 
-**Steps:**
+**Steps (PlatformIO):**
 1. Clone this repo
-2. Open STM32CubeIDE → `File > Open Projects from File System` → select the `project/` folder
-3. Add your control algorithm in `User/control/control.c` (create the file)
-4. Build (`Ctrl+B`) and flash via ST-Link
+2. Build firmware: `pio run`
+3. Upload firmware: `pio run -t upload`
+4. Edit your control algorithm in `lib/show/src/control.c`
+
+**Optional (CubeMX/CubeIDE reference):**
+- Original CubeMX metadata and linker script are kept in `project/` for pin/peripheral regeneration and reference.
 
 ---
 
