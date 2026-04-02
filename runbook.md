@@ -10,6 +10,7 @@ Muc tieu: test nhanh, an toan, lap lai duoc. Sau khi pass runbook nay se chuyen 
 - Kiem tra nut:
   - USER: RUN/STOP
   - M: SET ZERO
+  - + / -: trim manual torque khi chua lock upright
 - Build va upload:
   - `~/.platformio/penv/bin/pio run -t upload`
 
@@ -31,8 +32,11 @@ Muc tieu: test nhanh, an toan, lap lai duoc. Sau khi pass runbook nay se chuyen 
 ## 4. Chay swing-up
 
 - Bam USER de chuyen RUN (`R=1`).
+- Khi chua lock upright (`C=0`), dung nut `+/-` de trim `MU` (manual torque) nham test huong dong co, encoder va truyen thong command.
 - Quan sat:
   - `U%` thay doi theo chuyen dong, khong dung cung mot gia tri.
+  - `MU` thay doi khi bam `+/-`.
+  - `RL=1` nghia la dang bi chan mem cuoi hanh trinh (soft rail guard), firmware se cat torque.
   - Con lac dao dong va tang bien do dan.
   - Khi gan dinh, co vao pha capture (`C=1`) neu du dieu kien.
 

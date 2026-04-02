@@ -205,9 +205,9 @@ int main(void)
     OLED_ShowString(0, 2, (uint8_t*)"Press USER btn");
     OLED_Refresh_Gram();
     
-    /* Wait for User button press (PA5) */
+    /* Wait for User button press (schematic: PA7 / User_key) */
     /* Poll button - it's active LOW due to pull-up */
-    while(HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_5) == GPIO_PIN_SET)
+    while(HAL_GPIO_ReadPin(User_key_GPIO_Port, User_key_Pin) == GPIO_PIN_SET)
     {
       delay_ms(50);  /* Debounce delay */
     }
@@ -215,9 +215,9 @@ int main(void)
     /* Button detected! Flash LED 3 times */
     for(int i = 0; i < 3; i++)
     {
-      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);   /* LED ON (PA4) */
+      HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
       delay_ms(200);
-      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET); /* LED OFF */
+      HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
       delay_ms(200);
     }
     

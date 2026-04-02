@@ -41,13 +41,13 @@ All buttons are active-low with internal pull-up. Debounce: 5 ms delay in ISR.
 
 | Pin | Label | EXTI | Physical location | Function |
 |-----|-------|------|-------------------|----------|
-| PA5  | `User_key`   | EXTI5  (EXTI9_5_IRQn)   | Top of board, labelled **USER** | Single click: start / stop balancing (`Flag_Stop` toggle). On start: triggers swing-up sequence |
-| PA7  | `menu_key`   | EXTI7  (EXTI9_5_IRQn)   | Front of board, labelled **M**  | Single click: cycle selected PID parameter (B-KP → B-KD → P-KP → P-KD → repeat, shown as Y on OLED). Long press (~1 s): show help text |
+| PA7  | `User_key`   | EXTI7  (EXTI9_5_IRQn)   | User key **M1** | Single click: start / stop balancing |
+| PA2  | `menu_key`   | EXTI2  (EXTI2_IRQn)     | User key **X1** | Single click: set angle zero |
 | PA11 | `pid_plus`   | EXTI11 (EXTI15_10_IRQn) | Back of board, labelled **+**   | Increase selected PID parameter by its amplitude step |
 | PA12 | `pid_reduce` | EXTI12 (EXTI15_10_IRQn) | Back of board, labelled **−**   | Decrease selected PID parameter by its amplitude step |
-| PA2  | `reserved_key` | — (GPIO input, pull-up) | — | KEY2: single click moves cart one revolution forward/backward. Long press (~2 s): toggle auto swing-up mode (`auto_run`) |
+| PA0  | `reserved_key` | — (GPIO input, pull-up) | Reserved interface J3 | Reserved / not used in current control loop |
 
-> Note: PA2 (`KEY2`) is polled in the 5 ms control loop via `Key()`, not handled by EXTI.
+> Note: Current firmware polls button states in the control loop; EXTI is configured for compatibility.
 
 ### PID parameter selection (menu_key cycles through)
 
@@ -134,7 +134,8 @@ The OLED is wired to both a software bit-bang SPI and I2C1 (hardware). Check `ol
 | Interrupt | Preempt | Sub | Source |
 |-----------|---------|-----|--------|
 | TIM1_UP   | 1 | 3 | 5 ms control loop |
-| EXTI9_5   | 2 | 2 | PA5 (User_key), PA7 (menu_key) |
+| EXTI2     | 2 | 2 | PA2 (menu_key) |
+| EXTI9_5   | 2 | 2 | PA7 (User_key) |
 | EXTI15_10 | 2 | 2 | PA11 (pid_plus), PA12 (pid_reduce) |
 | SysTick   | 0 | 0 | HAL timebase |
 

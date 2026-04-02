@@ -65,7 +65,7 @@ void SystemClock_Config(void);
 #define CONTROL_PERIOD_MS 5U
 #define OLED_PERIOD_MS 80U
 #define COMMAND_TIMEOUT_MS 250U
-#define UPRIGHT_ANGLE_RAD 0.0f
+#define UPRIGHT_ANGLE_RAD 3.1415926f
 
 #define UPRIGHT_ENTER_TH_RAD 0.30f
 #define UPRIGHT_EXIT_TH_RAD 0.45f
@@ -82,9 +82,25 @@ void SystemClock_Config(void);
 #define POT_ZERO_MIN_ADC 1010U
 #define POT_ZERO_MAX_ADC 1030U
 
-#define ENC_LEFT_LIMIT 4162
-#define ENC_RIGHT_LIMIT 65502
-#define ENC_SOFT_MARGIN 1200
+#define ENC_SOFT_LIMIT_POS 18000
+#define ENC_SOFT_LIMIT_NEG -18000
+#define JOG_U_CMD 0.18f
+
+#define GRAVITY_MPS2 9.81f
+#define PENDULUM_LENGTH_M 0.200f
+#define CART_MASS_KG 0.100f
+
+#define SWINGUP_U_SIGN 1.0f
+#define SWINGUP_MIN_PUMP_U 0.16f
+#define SWINGUP_ENERGY_TO_U 0.14f
+#define SWINGUP_KICK_TH_RAD 0.35f
+#define SWINGUP_KICK_DTH_RAD_S 1.0f
+#define SWINGUP_KICK_U 0.26f
+#define SWINGUP_MAX_U 0.72f
+#define SWINGUP_WINDOW_HALF_TICKS 3200
+#define SWINGUP_RETURN_U_MAX 0.62f
+#define SWINGUP_RETURN_KX 0.00020f
+#define SWINGUP_RETURN_KDX 0.00180f
 
 /* Update with measured Phase 1 dead-zone values (PWM units out of 7199). */
 #define MOTOR_DEADZONE_FORWARD_PWM 80U
@@ -106,6 +122,7 @@ static uint32_t g_frame_count = 0U;
 static uint8_t g_run_enabled = 0U;
 static uint8_t g_user_latch = 0U;
 static uint8_t g_menu_latch = 0U;
+static uint8_t g_x_latch = 0U;
 static uint8_t g_capture_mode = 0U;
 static uint8_t g_capture_hold_count = 0U;
 static uint8_t g_capture_lost_count = 0U;
@@ -114,6 +131,8 @@ static uint8_t g_zero_set_ok = 1U;
 static ControlMode g_remote_mode = CONTROL_MODE_IDLE;
 static float g_remote_u = 0.0f;
 static uint8_t g_remote_active_dbg = 0U;
+static uint8_t g_rail_blocked = 0U;
+static uint8_t g_jog_active_dbg = 0U;
 
 static void BootStageBlink(uint8_t times)
 {
@@ -187,19 +206,80 @@ static float ThetaErrFromUpright(float theta)
   return WrapPi(theta - UPRIGHT_ANGLE_RAD);
 }
 
-static float ComputeLqrU(float x_err, float x_dot, float theta, float dtheta)
+static float SignWithFallback(float v, float fallback)
 {
-  const float k_x = 0.0012f;
-  const float k_dx = 0.0020f;
-  const float k_th = 2.60f;
-  const float k_dth = 0.36f;
-  const float theta_err = ThetaErrFromUpright(theta);
+  if (v > 0.0f) {
+    return 1.0f;
+  }
+  if (v < 0.0f) {
+    return -1.0f;
+  }
+  return (fallback >= 0.0f) ? 1.0f : -1.0f;
+}
+
+static float ApplySwingWindowClamp(float u_cmd, float x_err, float x_dot)
+{
+  float x_over;
+  float u_return;
+
+  if (x_err > (float)SWINGUP_WINDOW_HALF_TICKS) {
+    x_over = x_err - (float)SWINGUP_WINDOW_HALF_TICKS;
+    u_return = -(SWINGUP_RETURN_KX * x_over + SWINGUP_RETURN_KDX * x_dot);
+    return ClampFloat(u_return, -SWINGUP_RETURN_U_MAX, 0.0f);
+  }
+
+  if (x_err < -(float)SWINGUP_WINDOW_HALF_TICKS) {
+    x_over = x_err + (float)SWINGUP_WINDOW_HALF_TICKS;
+    u_return = -(SWINGUP_RETURN_KX * x_over + SWINGUP_RETURN_KDX * x_dot);
+    return ClampFloat(u_return, 0.0f, SWINGUP_RETURN_U_MAX);
+  }
+
+  return ClampFloat(u_cmd, -SWINGUP_MAX_U, SWINGUP_MAX_U);
+}
+
+static float ComputeSwingUpU(float x_err, float x_dot, float theta, float dtheta)
+{
+  const float k_x = 0.000010f;
+  const float k_dx = 0.00110f;
+  const float energy_target = 2.0f * GRAVITY_MPS2 * PENDULUM_LENGTH_M;
+  float energy;
+  float energy_err;
+  float phase;
+  float phase_sign;
+  float pump_u;
+  float u_energy;
+  float u_center;
   float u;
 
-  /* LQR around upright equilibrium: theta ~= 0 (set by Z), x ~= x_ref */
-  u = -(k_x * x_err + k_dx * x_dot + k_th * theta_err + k_dth * dtheta);
+  /* Physical energy shaping with theta=0 at hanging-down and theta=pi at upright. */
+  energy = (0.5f * PENDULUM_LENGTH_M * PENDULUM_LENGTH_M * dtheta * dtheta)
+         + (GRAVITY_MPS2 * PENDULUM_LENGTH_M * (1.0f - cosf(theta)));
+  energy_err = energy_target - energy;
 
-  return ClampFloat(u, -0.70f, 0.70f);
+  phase = dtheta * cosf(theta);
+  phase_sign = SignWithFallback(phase, theta);
+
+  /* Strong pump: acceleration follows energy error with a minimum drive to overcome stiction. */
+  pump_u = (SWINGUP_ENERGY_TO_U * energy_err);
+  if (energy_err > 0.0f) {
+    pump_u += SWINGUP_MIN_PUMP_U;
+  }
+  pump_u = ClampFloat(pump_u, -SWINGUP_MAX_U, SWINGUP_MAX_U);
+  u_energy = SWINGUP_U_SIGN * phase_sign * pump_u;
+
+  /* Kick-start near hanging-down where dtheta can be too small for energy pumping to begin. */
+  if ((fabsf(theta) < SWINGUP_KICK_TH_RAD) && (fabsf(dtheta) < SWINGUP_KICK_DTH_RAD_S)) {
+    u_energy += SWINGUP_U_SIGN * SWINGUP_KICK_U * SignWithFallback(theta, 1.0f);
+  }
+
+  /* CART_MASS_KG placeholder kept explicit for next stage model-based tuning. */
+  (void)CART_MASS_KG;
+
+  /* Keep cart near x_ref while pumping energy. */
+  u_center = -(k_x * x_err + k_dx * x_dot);
+
+  u = u_energy + u_center;
+  return ApplySwingWindowClamp(u, x_err, x_dot);
 }
 
 static float ApplySlewRate(float target_u)
@@ -217,6 +297,19 @@ static float ApplySlewRate(float target_u)
   return g_prev_u;
 }
 
+static uint8_t IsSoftRailBlocked(int32_t enc_pos, float u_cmd)
+{
+  if ((enc_pos >= ENC_SOFT_LIMIT_POS) && (u_cmd > 0.0f)) {
+    return 1U;
+  }
+
+  if ((enc_pos <= ENC_SOFT_LIMIT_NEG) && (u_cmd < 0.0f)) {
+    return 1U;
+  }
+
+  return 0U;
+}
+
 static uint8_t TrySetZero(uint16_t adc_now)
 {
 #if POT_ZERO_STRICT_WINDOW
@@ -229,6 +322,23 @@ static uint8_t TrySetZero(uint16_t adc_now)
   g_angle_zero_adc = (float)adc_now;
   g_zero_set_ok = 1U;
   return 1U;
+}
+
+static void BlinkSetZeroResult(uint8_t ok)
+{
+  if (ok != 0U) {
+    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+    delay_ms(35);
+    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+  } else {
+    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+    delay_ms(25);
+    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+    delay_ms(25);
+    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+    delay_ms(25);
+    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+  }
 }
 
 static void UpdateUprightLock(float theta_err_abs, float dtheta_abs)
@@ -304,9 +414,13 @@ static void UpdateOledAngle(void)
   OLED_ShowChar(72, 36, (x_err >= 0) ? '+' : '-', 12, 1);
   OLED_ShowNumber(80, 36, x_abs, 4, 12);
 
-  OLED_ShowString(0, 48, (uint8_t *)"USER RUN M ZERO");
-  OLED_ShowString(94, 48, (uint8_t *)(POT_ZERO_STRICT_WINDOW ? "S1" : "S0"));
-  OLED_ShowString(110, 48, (uint8_t *)(g_zero_set_ok ? "OK" : "ER"));
+  OLED_ShowString(0, 48, (uint8_t *)"J:");
+  OLED_ShowNumber(12, 48, g_jog_active_dbg, 1, 12);
+  OLED_ShowString(24, 48, (uint8_t *)"RL:");
+  OLED_ShowNumber(42, 48, g_rail_blocked, 1, 12);
+  OLED_ShowString(54, 48, (uint8_t *)(POT_ZERO_STRICT_WINDOW ? "S1" : "S0"));
+  OLED_ShowString(70, 48, (uint8_t *)(g_zero_set_ok ? "OK" : "ER"));
+  OLED_ShowString(86, 48, (uint8_t *)"XREF");
   OLED_Refresh_Gram();
 }
 
@@ -380,7 +494,7 @@ int main(void)
 
   OLED_Clear();
   OLED_ShowString(0, 0, (uint8_t *)"BOOT OK");
-  OLED_ShowString(0, 12, (uint8_t *)"LQR READY");
+  OLED_ShowString(0, 12, (uint8_t *)"SWUP READY");
   OLED_ShowString(0, 24, (uint8_t *)"USER:RUN/STOP");
   OLED_ShowString(0, 36, (uint8_t *)"MENU:SET ZERO");
   OLED_Refresh_Gram();
@@ -389,6 +503,7 @@ int main(void)
   OLED_Clear();
   OLED_ShowString(0, 12, (uint8_t *)"USER RUN/STOP");
   OLED_ShowString(0, 24, (uint8_t *)"MENU SET ZERO");
+  OLED_ShowString(0, 36, (uint8_t *)"+/- JOG  X:XREF");
   OLED_Refresh_Gram();
   
   /* USER CODE END 2 */
@@ -402,6 +517,7 @@ int main(void)
     /* USER CODE BEGIN 3 */
     static uint8_t oled_div = 0U;
     static uint8_t local_run_latched = 0U;
+    static uint8_t user_force_stop = 0U;
     static uint16_t remote_miss_ticks = 0xFFFFU;
     static uint8_t run_prev = 0U;
     float u_cmd = 0.0f;
@@ -411,6 +527,11 @@ int main(void)
     ControlCommandData cmd;
     RobotStateData telem;
     uint8_t remote_active = 0U;
+    uint8_t jog_plus_held;
+    uint8_t jog_minus_held;
+    uint8_t jog_active = 0U;
+
+    Comms_Process();
 
     g_curr_adc = ReadAngleAdc();
     g_curr_theta_rad = (((float)g_curr_adc) - g_angle_zero_adc) * ADC_TO_RAD;
@@ -418,6 +539,7 @@ int main(void)
     g_prev_theta_rad = g_curr_theta_rad;
     g_filt_dtheta_rad_s = 0.55f * g_filt_dtheta_rad_s + 0.45f * g_curr_dtheta_rad_s;
     theta_err_abs = fabsf(ThetaErrFromUpright(g_curr_theta_rad));
+
 
     UpdateUprightLock(theta_err_abs, fabsf(g_filt_dtheta_rad_s));
 
@@ -438,8 +560,14 @@ int main(void)
     remote_active = (remote_miss_ticks <= (COMMAND_TIMEOUT_MS / CONTROL_PERIOD_MS)) ? 1U : 0U;
     g_remote_active_dbg = remote_active;
 
+    jog_plus_held = (HAL_GPIO_ReadPin(pid_plus_GPIO_Port, pid_plus_Pin) == GPIO_PIN_RESET) ? 1U : 0U;
+    jog_minus_held = (HAL_GPIO_ReadPin(pid_reduce_GPIO_Port, pid_reduce_Pin) == GPIO_PIN_RESET) ? 1U : 0U;
+
     if (ButtonPressedLatched(User_key_GPIO_Port, User_key_Pin, &g_user_latch) != 0U) {
-      if (remote_active != 0U) {
+      user_force_stop = (user_force_stop == 0U) ? 1U : 0U;
+
+      if (user_force_stop != 0U) {
+        local_run_latched = 0U;
         g_remote_mode = CONTROL_MODE_IDLE;
         g_remote_u = 0.0f;
         remote_miss_ticks = 0xFFFFU;
@@ -449,27 +577,37 @@ int main(void)
         g_prev_u = 0.0f;
         Motor_Stop();
       } else {
-        local_run_latched = (local_run_latched == 0U) ? 1U : 0U;
+        /* Resume from USER button with local run mode. */
+        local_run_latched = 1U;
+        g_remote_mode = CONTROL_MODE_IDLE;
+        g_remote_u = 0.0f;
+        remote_miss_ticks = 0xFFFFU;
+        g_remote_active_dbg = 0U;
       }
     }
 
     if (ButtonPressedLatched(menu_key_GPIO_Port, menu_key_Pin, &g_menu_latch) != 0U) {
-      if (TrySetZero(g_curr_adc) != 0U) {
-        HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
-        delay_ms(35);
-        HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
-      } else {
-        HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
-        delay_ms(25);
-        HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
-        delay_ms(25);
-        HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
-        delay_ms(25);
-        HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
-      }
+      BlinkSetZeroResult(TrySetZero(g_curr_adc));
     }
 
-    if (remote_active != 0U) {
+    if (ButtonPressedLatched(reserved_key_GPIO_Port, reserved_key_Pin, &g_x_latch) != 0U) {
+      /* X key: store current cart position as LQR target x_ref. */
+      g_x_ref_enc = g_curr_enc;
+      HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+      delay_ms(20);
+      HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+    }
+
+    if (user_force_stop != 0U) {
+      g_run_enabled = 0U;
+      g_curr_u = 0.0f;
+      g_prev_u = 0.0f;
+      g_upright_locked = 0U;
+      g_capture_mode = 0U;
+      g_capture_hold_count = 0U;
+      g_capture_lost_count = 0U;
+      Motor_Stop();
+    } else if (remote_active != 0U) {
       g_run_enabled = (g_remote_mode != CONTROL_MODE_IDLE) ? 1U : 0U;
 
       if (g_run_enabled == 0U) {
@@ -481,18 +619,14 @@ int main(void)
         g_capture_lost_count = 0U;
         Motor_Stop();
       } else {
-        if (g_remote_mode == CONTROL_MODE_LQR) {
-          if (g_upright_locked != 0U) {
-            u_cmd = ComputeLqrU((float)(g_curr_enc - g_x_ref_enc), g_curr_x_vel, g_curr_theta_rad, g_filt_dtheta_rad_s);
-          } else {
-            u_cmd = 0.0f;
-          }
+        if ((g_remote_mode == CONTROL_MODE_SWINGUP) || (g_remote_mode == CONTROL_MODE_LQR)) {
+          /* Swing-up only phase: ignore LQR branch until identified model/gains are available. */
+          u_cmd = ComputeSwingUpU((float)(g_curr_enc - g_x_ref_enc), g_curr_x_vel, g_curr_theta_rad, g_filt_dtheta_rad_s);
         } else {
           u_cmd = g_remote_u;
         }
 
         g_curr_u = ApplySlewRate(u_cmd);
-        Motor_SetTorque(g_curr_u);
       }
     } else {
       g_run_enabled = local_run_latched;
@@ -506,15 +640,37 @@ int main(void)
         g_capture_lost_count = 0U;
         Motor_Stop();
       } else {
-        if (g_upright_locked != 0U) {
-          u_cmd = ComputeLqrU((float)(g_curr_enc - g_x_ref_enc), g_curr_x_vel, g_curr_theta_rad, g_filt_dtheta_rad_s);
-        } else {
-          u_cmd = 0.0f;
-        }
+        u_cmd = ComputeSwingUpU((float)(g_curr_enc - g_x_ref_enc), g_curr_x_vel, g_curr_theta_rad, g_filt_dtheta_rad_s);
 
         g_curr_u = ApplySlewRate(u_cmd);
+      }
+    }
+
+    if ((remote_active == 0U) && (g_run_enabled == 0U) && (user_force_stop == 0U)) {
+      /* Local jog mode: hold +/- to move cart before balancing. */
+      if (jog_plus_held != jog_minus_held) {
+        jog_active = 1U;
+        u_cmd = (jog_plus_held != 0U) ? JOG_U_CMD : -JOG_U_CMD;
+        g_curr_u = ApplySlewRate(u_cmd);
+      } else {
+        g_curr_u = 0.0f;
+        g_prev_u = 0.0f;
+      }
+    }
+
+    g_jog_active_dbg = jog_active;
+
+    if ((g_run_enabled != 0U) || (jog_active != 0U)) {
+      g_rail_blocked = IsSoftRailBlocked(g_curr_enc, g_curr_u);
+      if (g_rail_blocked != 0U) {
+        g_curr_u = 0.0f;
+        g_prev_u = 0.0f;
+        Motor_Stop();
+      } else {
         Motor_SetTorque(g_curr_u);
       }
+    } else {
+      g_rail_blocked = 0U;
     }
 
     if ((g_run_enabled != 0U) && (run_prev == 0U)) {

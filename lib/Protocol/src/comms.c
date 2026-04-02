@@ -29,15 +29,19 @@ typedef enum {
 
 static UART_HandleTypeDef *g_huart = NULL;
 static volatile ControlCommandData g_latest_cmd = {0};
+static volatile CommsStats g_stats = {0};
 static uint8_t g_rx_dma_buf[16] = {0};
 static uint8_t g_payload[sizeof(ControlCommandPacket) - 2U] = {0};
 static uint8_t g_payload_idx = 0U;
 static RxState g_rx_state = RX_WAIT_HEADER_0;
+static RobotStatePacket g_tx_pkt = {0};
 
 static void Comms_StartRxDMA(void)
 {
   if (g_huart != NULL) {
-    HAL_UART_Receive_DMA(g_huart, g_rx_dma_buf, sizeof(g_rx_dma_buf));
+    if (HAL_UART_Receive_DMA(g_huart, g_rx_dma_buf, sizeof(g_rx_dma_buf)) == HAL_OK) {
+      g_stats.rx_dma_restarts++;
+    }
   }
 }
 
@@ -63,6 +67,7 @@ static void Comms_ParseByte(uint8_t b)
         g_rx_state = RX_WAIT_PAYLOAD;
         g_payload_idx = 0U;
       } else if (b == COMMAND_HEADER_0) {
+        g_stats.rx_parse_resync++;
         g_rx_state = RX_WAIT_HEADER_1;
       } else {
         g_rx_state = RX_WAIT_HEADER_0;
@@ -81,6 +86,8 @@ static void Comms_ParseByte(uint8_t b)
         g_latest_cmd.mode = (pkt.mode <= CONTROL_MODE_LQR) ? (ControlMode)pkt.mode : CONTROL_MODE_IDLE;
         g_latest_cmd.timestamp_ms = HAL_GetTick();
         g_latest_cmd.is_fresh = 1U;
+        g_stats.rx_packets++;
+        g_stats.last_rx_ms = g_latest_cmd.timestamp_ms;
 
         Comms_ResetParser();
       }
@@ -108,34 +115,53 @@ static void Comms_ParseBuffer(const uint8_t *buf, uint16_t len)
 void Comms_Init(UART_HandleTypeDef *huart)
 {
   g_huart = huart;
+  memset((void *)&g_stats, 0, sizeof(g_stats));
+  memset((void *)&g_latest_cmd, 0, sizeof(g_latest_cmd));
   Comms_ResetParser();
   Comms_StartRxDMA();
 }
 
 void Comms_Process(void)
 {
-  (void)0;
+  if (g_huart == NULL) {
+    return;
+  }
+
+  if ((g_huart->RxState == HAL_UART_STATE_READY) && (g_huart->hdmarx != NULL)) {
+    if (__HAL_DMA_GET_COUNTER(g_huart->hdmarx) == 0U) {
+      Comms_StartRxDMA();
+    }
+  }
 }
 
 void Comms_SendTelemetry(const RobotStateData *state)
 {
-  RobotStatePacket pkt;
   HAL_StatusTypeDef status;
 
   if ((g_huart == NULL) || (state == NULL)) {
     return;
   }
 
-  pkt.header[0] = TELEMETRY_HEADER_0;
-  pkt.header[1] = TELEMETRY_HEADER_1;
-  pkt.x_pos = state->x_pos;
-  pkt.x_vel = state->x_vel;
-  pkt.theta = state->theta;
-  pkt.theta_vel = state->theta_vel;
+  if (g_huart->gState != HAL_UART_STATE_READY) {
+    g_stats.tx_dropped++;
+    return;
+  }
 
-  /* Transmit with 50ms timeout (increased from 5ms) */
-  status = HAL_UART_Transmit(g_huart, (uint8_t *)&pkt, sizeof(pkt), 50U);
-  (void)status;  /* Ignore unused result for now */
+  g_tx_pkt.header[0] = TELEMETRY_HEADER_0;
+  g_tx_pkt.header[1] = TELEMETRY_HEADER_1;
+  g_tx_pkt.x_pos = state->x_pos;
+  g_tx_pkt.x_vel = state->x_vel;
+  g_tx_pkt.theta = state->theta;
+  g_tx_pkt.theta_vel = state->theta_vel;
+
+  status = HAL_UART_Transmit_IT(g_huart, (uint8_t *)&g_tx_pkt, sizeof(g_tx_pkt));
+  if (status == HAL_OK) {
+    g_stats.tx_packets++;
+  } else if (status == HAL_BUSY) {
+    g_stats.tx_dropped++;
+  } else {
+    g_stats.tx_errors++;
+  }
 }
 
 uint8_t Comms_GetLatestCommand(ControlCommandData *cmd)
@@ -168,8 +194,20 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
   if ((g_huart != NULL) && (huart == g_huart)) {
+    g_stats.rx_errors++;
     HAL_UART_DMAStop(g_huart);
     Comms_ResetParser();
     Comms_StartRxDMA();
   }
+}
+
+void Comms_GetStats(CommsStats *stats)
+{
+  if (stats == NULL) {
+    return;
+  }
+
+  __disable_irq();
+  memcpy(stats, (const void *)&g_stats, sizeof(CommsStats));
+  __enable_irq();
 }
