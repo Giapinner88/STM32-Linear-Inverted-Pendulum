@@ -88,21 +88,6 @@ khi vận tốc góc đi qua zero, tránh nhiễu ADC làm đảo cầu H liên 
 
 ---
 
-## Thông số nhận dạng từ log phần cứng (`logs/run1.csv`, `logs/run2.csv`)
-
-| Đại lượng | Giá trị đo | Mô hình hãng | Cách đo |
-| --- | ---: | ---: | --- |
-| Lệch đỉnh của biến trở | $+0.127$ rad | $0$ | Điểm $|\dot\theta|$ nhỏ nhất khi quay tự do; tinh chỉnh bằng góc trung bình khi cân bằng |
-| Hằng số thời gian xe $\tau$ | 57 ms | 5.6 ms | Replay chuỗi $u$ đã ghi qua mô hình, sai số 2.6 mm |
-| $k_v$ (V trên m/s) | 13.8 | 11.56 | như trên; $\ddot x = (V/k_v - \dot x)/\tau$ |
-| $\omega^2$ con lắc | 37.8 s⁻² | 27.6 s⁻² | Chu kỳ dao động tự do 1.04 s |
-
-Biến trở không phủ đủ 360°: với điểm 0 lấy ở vị trí buông, đỉnh thật đọc được
-là $\pi + 0.127$ rad (`CARTPOLE_UPRIGHT_OFFSET_RAD`). Khi chưa có offset này, LQR
-giữ con lắc nghiêng khoảng 8° nên xe phải tăng tốc liên tục và lao vào ray.
-
----
-
 ## LQR Gains (từ source code gốc, $L = 390$ mm)
 
 > ⚠️ Các gain dưới đây được port từ cấu hình tham khảo **L = 390 mm** và chưa được nhận dạng lại trên cơ cấu hiện tại. Giá trị `0.200 m` trong energy shaping là khoảng cách hiệu dụng tới tâm khối lượng, không phải thanh đã bị rút ngắn còn 200 mm. Cần xác nhận mô hình thực nghiệm trước khi coi gain LQR là tối ưu.

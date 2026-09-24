@@ -18,7 +18,14 @@ typedef struct {
   float x_vel;
   float theta;
   float theta_vel;
+  float control_effort;
+  uint16_t frame;
+  uint8_t flags;
 } RobotStateData;
+
+#define TELEMETRY_FLAG_CAPTURED 0x01U
+#define TELEMETRY_FLAG_RUNNING 0x02U
+#define TELEMETRY_FLAG_RAIL_BLOCKED 0x04U
 
 typedef struct {
   float control_effort;

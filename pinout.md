@@ -1,6 +1,6 @@
 # Pin assignment — STM32F103C8 / IP570 Wheeltec
 
-> Source: `InvertedPendulum.ioc` (STM32CubeMX) + `exti.c` + `key.h` + `LED.H`  
+> Source: current `project/InvertedPendulum.ioc`, HAL setup, and supplied Wheeltec reference firmware
 > MCU: STM32F103C8Tx · LQFP48 · 72 MHz (HSE × PLL × 9)
 
 ---
@@ -21,7 +21,8 @@
 | PB6 | `ENC_A` | TIM4_CH1 | Encoder channel A — quadrature mode TI12 |
 | PB7 | `ENC_B` | TIM4_CH2 | Encoder channel B — IC filter = 10 |
 
-Counter range: ~5850 (right end) to ~10000 (left end).
+The active application accumulates encoder motion relative to startup. Its
+configured right-home/left-wall convention is 0 to 4130 ticks.
 
 ---
 
@@ -33,30 +34,29 @@ Counter range: ~5850 (right end) to ~10000 (left end).
 | PB12 | `BIN2` | H-bridge direction bit 2 (GPIO output) |
 | PB13 | `BIN1` | H-bridge direction bit 1 (GPIO output) |
 
+The manufacturer convention is retained: `u > 0` drives right and `u < 0`
+drives left. Raw encoder ticks have the opposite sign: they increase toward the
+left. Control modules convert raw position/velocity with `x_ref = -ticks`.
+
 ---
 
 ## Buttons — external interrupts
 
-All buttons are active-low with internal pull-up. Debounce: 5 ms delay in ISR.
+All buttons are active-low with internal pull-up. The active firmware detects
+press edges by polling and latching them in the nominal 20 ms application loop.
 
 | Pin | Label | EXTI | Physical location | Function |
 |-----|-------|------|-------------------|----------|
-| PA7  | `User_key`   | EXTI7  (EXTI9_5_IRQn)   | User key **M1** | Single click: start / stop balancing |
-| PA2  | `menu_key`   | EXTI2  (EXTI2_IRQn)     | User key **X1** | Single click: set angle zero |
-| PA11 | `pid_plus`   | EXTI11 (EXTI15_10_IRQn) | Back of board, labelled **+**   | Increase selected PID parameter by its amplitude step |
-| PA12 | `pid_reduce` | EXTI12 (EXTI15_10_IRQn) | Back of board, labelled **−**   | Decrease selected PID parameter by its amplitude step |
-| PA0  | `reserved_key` | — (GPIO input, pull-up) | Reserved interface J3 | Short press: toggle RUN/CAL, long press: home back to the fixed right-wall reference |
+| PA5  | `User_key`   | EXTI5  (EXTI9_5_IRQn)   | Physical **USER** | One click: start automatic calibration/swing-up/balance; next click: stop |
+| PA7  | `menu_key`   | EXTI7  (EXTI9_5_IRQn)   | **M1/menu** | Set angle zero while the automatic sequence is idle |
+| PA11 | `pid_plus`   | EXTI11 (EXTI15_10_IRQn) | Back of board, labelled **+**   | Positive manual jog while idle |
+| PA12 | `pid_reduce` | EXTI12 (EXTI15_10_IRQn) | Back of board, labelled **−**   | Negative manual jog while idle |
+| PA2  | `reserved_key` | — (GPIO input, pull-up) | Auxiliary key | Short press: toggle manual RUN/CAL inhibit; long press: home to the fixed right-wall reference |
 
 > Note: Current firmware polls button states in the control loop; EXTI is configured for compatibility.
 
-### PID parameter selection (menu_key cycles through)
-
-| Menu value | Parameter | Amplitude step variable |
-|------------|-----------|------------------------|
-| 1 | `Balance_KP` | `Amplitude1` (default 5) |
-| 2 | `Balance_KD` | `Amplitude2` (default 20) |
-| 3 | `Position_KP` | `Amplitude3` (default 1) |
-| 4 | `Position_KD` | `Amplitude4` (default 10) |
+The `+` and `-` keys currently provide low-authority manual jog while idle; they
+do not edit PID gains. Automatic operation requires only USER on PA5.
 
 ---
 
@@ -67,10 +67,8 @@ All buttons are active-low with internal pull-up. Debounce: 5 ms delay in ISR.
 | PA4 | `LED` | **L1** — user LED | GPIO output, pull-up, active-low (`LED=0` = on) |
 | — | — | **L2** — power LED | Hardwired to VCC via resistor. Always on when powered. No GPIO |
 
-L1 behaviour from `Key()` in control loop:
-- `auto_run=1` and `Flag_Stop=1`: L1 on solid (auto swing-up mode active)
-- `auto_run=0` and `Flag_Stop=1`: L1 off (manual mode, stopped)
-- `Flag_Stop=0` (balancing): L1 blinks via `Led_Flash(100)` every 500 ms
+L1 blinks four times during boot, then toggles every ten application frames as
+a liveness indicator. It is not a controller-mode indicator.
 
 ---
 
@@ -122,20 +120,19 @@ The OLED is wired to both a software bit-bang SPI and I2C1 (hardware). Check `ol
 
 | Timer | Mode | Period | Use |
 |-------|------|--------|-----|
-| TIM1  | Up interrupt | prescaler 7199, period 49 | **5 ms control loop** (TIM1_UP_IRQn, priority 1/3) |
+| TIM1  | Up interrupt | prescaler 7199, period 49 | Initialized by CubeMX; no active controller callback |
 | TIM3  | PWM CH4 | period 7199 (10 kHz) | Motor PWM output on PB1 |
 | TIM4  | Encoder TI12 | — | Linear encoder on PB6/PB7 |
 | SysTick | — | — | HAL timebase (1 ms) |
 
----i gian thực để loại trừ
+---
 
 ## NVIC interrupt priorities (priority group 2)
 
 | Interrupt | Preempt | Sub | Source |
 |-----------|---------|-----|--------|
-| TIM1_UP   | 1 | 3 | 5 ms control loop |
-| EXTI2     | 2 | 2 | PA2 (menu_key) |
-| EXTI9_5   | 2 | 2 | PA7 (User_key) |
+| TIM1_UP   | 1 | 3 | Reserved/unused by current control path |
+| EXTI9_5   | 2 | 2 | PA5 (USER), PA7 (M1/menu) |
 | EXTI15_10 | 2 | 2 | PA11 (pid_plus), PA12 (pid_reduce) |
 | SysTick   | 0 | 0 | HAL timebase |
 
@@ -163,7 +160,7 @@ HSE (8 MHz crystal)
 | Product name | Wheeltec IP570 linear inverted pendulum |
 | MCU | STM32F103C8T6 — ARM Cortex-M3, 72 MHz, 64 KB flash, 20 KB SRAM |
 | Supply voltage | 12 V DC (battery pack) |
-| Control cycle | 5 ms (200 Hz), driven by TIM1 interrupt |
+| Control cycle | Nominal 20 ms cooperative main-loop frame; measured `dt` from HAL tick; 10-sample ADC average |
 | Motor driver | TB6612FNG (integrated on board), VM max 15 V, output avg 1.2 A, peak 3.2 A |
 | Communication | USART1 at 128000 baud — program download via MicroUSB, DataScope waveform display |
 | Display | 0.96" OLED 128×64 (I2C / bit-bang SPI) |
@@ -210,7 +207,7 @@ Single-turn conductive plastic rotary potentiometer, used as angular displacemen
 | Operating temperature | −55°C to +125°C |
 | ADC reading at vertical-down | ~1024 (12-bit, 0–4095 full range) |
 | ADC reading at vertical-up (balance point) | ~3100 (`ZHONGZHI = 3100` in firmware) |
-| Calibration target range | 1010–1030 (vertical down) |
+| Automatic calibration acceptance | 990–1060 (vertical down; target 1024) |
 
 ---
 
@@ -221,15 +218,18 @@ The cart position is measured by the motor's own Hall encoder read via TIM4 in q
 | Parameter | Value | Source |
 |-----------|-------|--------|
 | Encoder type | Hall effect, 2-channel quadrature | hardware |
-| Counts at left end (start position) | ~10000 | firmware constant |
-| Counts at right end | ~5850 | firmware constant |
-| Cart center position | 7925 (`POSITION_MIDDLE`) | `control.h` |
-| Usable travel range | 5900–9900 counts (edge protection) | `control.c` |
-| One full motor revolution | 1040 counts | `control.c` |
+| Counts at left end relative to current right home | 4130 | `cartpole_config.h` |
+| Counts at right home | 0 | `cartpole_config.h` |
+| Nominal center | 2065 ticks from right home | Derived from configured travel |
+| Rail safety margin | 120 ticks | `cartpole_config.h` |
+| One full motor revolution | 1040 counts | Supplied reference firmware |
 
 ---
 
-### Default PID parameters (firmware defaults)
+### Legacy PID parameters from the supplied reference firmware
+
+These values are retained only for provenance. They are not compiled into the
+current energy-shaping/LQR control path.
 
 | Parameter | Default value | Physical meaning |
 |-----------|--------------|-----------------|

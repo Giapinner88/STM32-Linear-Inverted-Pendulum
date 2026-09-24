@@ -1,0 +1,91 @@
+# Control methods
+
+This note records the three control methods considered for the linear inverted
+pendulum. The deployed autonomous sequence currently uses **energy shaping for
+swing-up** and **LQR for balance**. PID is retained as a transparent baseline
+and fallback design, but it is not selected in the current firmware path.
+
+## 1. PID / cascaded PD baseline
+
+Near upright, use an inner pendulum-angle loop and an outer cart-position loop:
+
+```text
+theta_error = wrap(theta - pi)
+position_correction = Kpx*x + Kdx*x_dot
+u = -(Kpt*theta_error + Kdt*theta_dot + position_correction)
+```
+
+Integral action should normally be omitted or tightly clamped because rail
+limits and motor saturation create wind-up. This controller is useful for sign
+checks and manual tuning, but a single fixed gain set does not perform the full
+swing-up from the downward equilibrium.
+
+## 2. Energy-shaping swing-up
+
+The pendulum energy estimate is
+
+```text
+E = 0.0032*theta_dot^2 + 0.1764*(cos(theta) - 1)
+```
+
+The deployed calculation follows the supplied Wheeltec firmware directly:
+
+```text
+if E >= 0: u = 0
+else:
+    accel = 98*sign(E*theta_dot*cos(theta))
+            + sign(x)*log(1 - min(abs(x)/0.15, 0.95))
+    u = 0.0651*accel + 11.5556*x_dot
+        + 0.0028*cos(theta)*(0.1764*sin(theta) - 0.0180*accel)/0.0012
+        - 0.8440*sin(theta)*theta_dot^2
+```
+
+Here `x` follows the supplied Wheeltec convention: positive is toward the
+right. Because raw TIM4 ticks increase toward the left, the implementation uses
+`x = -encoder_ticks` and `x_dot = -encoder_ticks_per_second`.
+
+The implementation clamps the swing command and overrides it with a return
+command when the cart leaves the central swing window. See
+`lib/CartpoleControl/src/swingup_controller.c`.
+
+Because the sign law is undefined at the exact downward, motionless equilibrium,
+the implementation applies one bounded startup kick inside a small downward
+angle/rate region. Outside the central cart window, an inward command has a
+minimum magnitude so it can overcome static friction; a cart already moving
+quickly inward is allowed to coast. Swing-up permits a `0.90` command change per
+20 ms sample so bang-bang reversals are not averaged away, while captured LQR
+uses a separate `0.20` slew limit.
+
+The supplied firmware's near-down expression evaluates to approximately
+`10.50 V / 12 V = 0.875` before its `6900/7199` clamp. The hardware preset
+therefore uses a `0.88` startup/pump command rather than the lower exploratory
+setting used during initial bring-up.
+
+## 3. LQR upright balance
+
+Around upright, the state is
+
+```text
+state = [x, x_dot, theta_error, theta_dot]
+u_voltage = -K * state
+```
+
+The current 40 cm reference gains are:
+
+```text
+K = [-36.4232, -40.0996, -101.4914, -15.8376]
+```
+
+The voltage command is divided by the 12 V supply and clamped to the PWM
+authority limit. Encoder signs and the upright angle convention are converted
+explicitly in `lib/CartpoleControl/src/lqr_controller.c`.
+
+## Hybrid handoff
+
+The controller starts in energy-shaping mode. It enters LQR only after the
+pendulum remains within the capture angle/rate bounds for a configured number
+of samples. It exits LQR when wider bounds are crossed. The two thresholds form
+hysteresis and reduce rapid mode switching. A shared slew limiter bounds the
+command step using the mode-specific slew limit at every nominal 20 ms sample.
+
+All numerical parameters are centralized in `include/cartpole_config.h`.

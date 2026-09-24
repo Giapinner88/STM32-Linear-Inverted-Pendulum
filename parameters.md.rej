@@ -1,0 +1,20 @@
+--- parameters.md
++++ parameters.md
+@@ -77,11 +77,12 @@
+ - Hành trình cấu hình: từ 0 ticks ở tường phải đến 4130 ticks ở tường trái.
+ - Biên an toàn cứng: 120 ticks; lệnh tiếp tục đi ra ngoài bị chặn.
+ - Sau khi USER calibration, giới hạn được dịch theo tâm xe vừa ghi nhận với nửa hành trình 2065 ticks.
+-- Trong swing-up, ngoài cửa sổ $|x|<1700$ ticks, luật trả xe về tâm dùng $k_x=2.0\times10^{-4}$, $k_v=1.8\times10^{-3}$, lực vào tâm tối thiểu $0.80$ và giới hạn $|u|\le6900/7199$.
+-- Slew tách theo mode: `0.90` mỗi mẫu 20 ms cho swing-up và `0.20` cho LQR.
++- Chế độ trả xe được kích hoạt khi $|x|>1700$ ticks và giữ nguyên cho tới khi xe vào lại $|x|<1100$ ticks, tránh rung tại ngưỡng.
++- Luật trả xe dùng $k_x=2.0\times10^{-4}$, $k_v=1.8\times10^{-3}$, lực vào tâm tối thiểu $0.80$ và giới hạn $|u|\le6900/7199$.
++- Slew tách theo mode: `0.45` mỗi mẫu 20 ms cho swing-up và `0.20` cho LQR.
+ 
+ ### 3) Trình tự tune khuyến nghị (an toàn)
+ 
+-1. Tăng/giảm $k_E$ trước để chỉnh mức bơm năng lượng.
+-2. Nếu xe chạy xa tâm, tăng nhẹ $k_x$ và $k_v$.
+-3. Nếu còn tiến sát tường, giảm `CARTPOLE_SWINGUP_MAX_U` hoặc thu nhỏ `CARTPOLE_SWINGUP_WINDOW_HALF_TICKS`.
++1. Kiểm tra dấu của $x$, $\dot{x}$, $\theta$ và $\dot{\theta}$ trước khi đổi hệ số hãng.
++2. Nếu motor còn đảo dấu do nhiễu, tăng nhẹ `CARTPOLE_SWINGUP_PHASE_HYST_RAD_S`.
++3. Nếu xe tiến sát tường, thu nhỏ `CARTPOLE_SWINGUP_WINDOW_HALF_TICKS` hoặc tăng vùng hồi tâm.

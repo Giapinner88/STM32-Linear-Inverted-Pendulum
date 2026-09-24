@@ -2,7 +2,8 @@
 """Binary serial bridge for STM32 inverted pendulum firmware.
 
 Protocol:
-- Telemetry packet (MCU -> PC): 0xAA 0xBB + 4 floats (x_pos, x_vel, theta, theta_vel)
+- Telemetry packet (MCU -> PC): 0xAA 0xBB + 5 floats (x_pos, x_vel, theta,
+  theta_vel, u) + uint16 frame + uint8 flags + uint8 checksum
 - Command packet (PC -> MCU): 0xCC 0xDD + float control_effort + uint8 mode
 """
 
@@ -20,7 +21,7 @@ import serial
 
 TELEMETRY_HEADER = b"\xAA\xBB"
 COMMAND_HEADER = b"\xCC\xDD"
-TELEMETRY_FMT = "<2sffff"
+TELEMETRY_FMT = "<2sfffffHBB"
 COMMAND_FMT = "<2sfB"
 TELEMETRY_SIZE = struct.calcsize(TELEMETRY_FMT)
 
@@ -35,6 +36,9 @@ class Telemetry:
     x_vel: float
     theta: float
     theta_vel: float
+    u: float = 0.0
+    frame: int = 0
+    flags: int = 0
 
 
 class PacketParser:
@@ -62,13 +66,17 @@ class PacketParser:
                 return out
 
             raw = bytes(self._buf[:TELEMETRY_SIZE])
+            if (sum(raw[2:-1]) & 0xFF) != raw[-1]:
+                # Header bytes inside a payload: skip one byte and resync.
+                del self._buf[:1]
+                continue
             del self._buf[:TELEMETRY_SIZE]
 
-            header, x_pos, x_vel, theta, theta_vel = struct.unpack(TELEMETRY_FMT, raw)
-            if header != TELEMETRY_HEADER:
-                continue
-
-            out.append(Telemetry(x_pos=x_pos, x_vel=x_vel, theta=theta, theta_vel=theta_vel))
+            (_, x_pos, x_vel, theta, theta_vel, u, frame, flags,
+             _) = struct.unpack(TELEMETRY_FMT, raw)
+            out.append(Telemetry(x_pos=x_pos, x_vel=x_vel, theta=theta,
+                                 theta_vel=theta_vel, u=u, frame=frame,
+                                 flags=flags))
 
 
 def build_command(control_effort: float, mode: int) -> bytes:

@@ -1,74 +1,18 @@
 #include "pendulum_app.h"
 
 #include "main.h"
-#include "delay.h"
-#include "oled.h"
-#include "motor.h"
+#include "cartpole_config.h"
+#include "cartpole_math.h"
+#include "cartpole_safety.h"
 #include "comms.h"
+#include "delay.h"
+#include "hybrid_controller.h"
+#include "motor.h"
+#include "pendulum_sequence.h"
+#include "pendulum_ui.h"
+#include "swingup_controller.h"
 
-#include <math.h>
-
-#define CONTROL_PERIOD_MS 5U
-#define OLED_PERIOD_MS 80U
-#define COMMAND_TIMEOUT_MS 250U
-#define UPRIGHT_ANGLE_RAD 3.1415926f
-
-#define UPRIGHT_ENTER_TH_RAD 0.30f
-#define UPRIGHT_EXIT_TH_RAD 0.45f
-#define UPRIGHT_ENTER_DTH_RAD_S 4.5f
-#define UPRIGHT_EXIT_DTH_RAD_S 7.0f
-#define UPRIGHT_ENTER_TICKS 5U
-#define UPRIGHT_EXIT_TICKS 1U
-
-#define ANGLE_ZERO_DEFAULT_ADC 1024.0f
-#define ADC_TO_RAD (2.0f * 3.1415926f / 4096.0f)
-
-/* If enabled, MENU accepts zero calibration only when ADC is in [1010, 1030]. */
-#define POT_ZERO_STRICT_WINDOW 1U
-#define POT_ZERO_MIN_ADC 1010U
-#define POT_ZERO_MAX_ADC 1030U
-
-#define ENC_RAW_LEFT_WALL 4130
-#define ENC_RAW_RIGHT_WALL 0
-#define ENC_WALL_MARGIN_TICKS 120
-#define JOG_U_CMD 0.18f
-
-#define GRAVITY_MPS2 9.81f
-#define PENDULUM_LENGTH_M 0.200f
-#define CART_MASS_KG 0.100f
-
-#define SWINGUP_U_SIGN 1.0f
-#define SWINGUP_MIN_PUMP_U 0.16f
-#define SWINGUP_ENERGY_TO_U 0.04f
-#define SWINGUP_KICK_TH_RAD 0.35f
-#define SWINGUP_KICK_DTH_RAD_S 1.0f
-#define SWINGUP_KICK_U 0.26f
-#define SWINGUP_MAX_U 0.72f
-#define SWINGUP_WINDOW_HALF_TICKS 1800
-#define SWINGUP_RETURN_U_MAX 0.62f
-#define SWINGUP_RETURN_KX 0.00020f
-#define SWINGUP_RETURN_KDX 0.00180f
-#define SWINGUP_CTRL_PROFILE_SIM 1U
-#define SWINGUP_CTRL_PROFILE_LEGACY 0U
-#define SWINGUP_CTRL_PROFILE SWINGUP_CTRL_PROFILE_SIM
-
-/* Simulation-derived swing-up gains from parameters.md for hardware A/B testing. */
-#define SIM_SWINGUP_K_E 0.030f
-#define SIM_SWINGUP_K_X 0.000012f
-#define SIM_SWINGUP_K_V 0.00095f
-#define SIM_SWINGUP_U_MAX 0.42f
-#define HOMING_MAX_U 0.58f
-#define HOMING_MIN_U 0.14f
-#define HOMING_DECAY_TICKS 1500.0f
-
-/* Update with measured Phase 1 dead-zone values (PWM units out of 7199). */
-#define MOTOR_DEADZONE_FORWARD_PWM 80U
-#define MOTOR_DEADZONE_REVERSE_PWM 80U
-
-#define RESERVED_KEY_LONG_PRESS_TICKS 60U
-
-static float g_angle_zero_adc = ANGLE_ZERO_DEFAULT_ADC;
-static float g_prev_theta_rad = 0.0f;
+static float g_angle_zero_adc = CARTPOLE_ANGLE_ZERO_DEFAULT_ADC;
 static float g_curr_dtheta_rad_s = 0.0f;
 static float g_filt_dtheta_rad_s = 0.0f;
 static float g_curr_theta_rad = 0.0f;
@@ -76,32 +20,33 @@ static float g_prev_theta_wrapped_rad = 0.0f;
 static float g_theta_unwrapped_rad = 0.0f;
 static uint8_t g_theta_unwrap_init = 0U;
 static float g_curr_u = 0.0f;
-static float g_prev_u = 0.0f;
+static float g_peak_abs_u = 0.0f;
 static uint16_t g_curr_adc = 0U;
 static int32_t g_curr_enc = 0;
 static uint16_t g_prev_enc_raw = 0U;
 static float g_curr_x_vel = 0.0f;
+static float g_theta_history_rad[CARTPOLE_RATE_WINDOW_SAMPLES];
+static int32_t g_enc_history[CARTPOLE_RATE_WINDOW_SAMPLES];
+static uint32_t g_tick_history_ms[CARTPOLE_RATE_WINDOW_SAMPLES];
+static uint8_t g_history_index = 0U;
+static uint8_t g_history_count = 0U;
 static uint32_t g_frame_count = 0U;
 static uint8_t g_run_enabled = 0U;
 static uint8_t g_user_latch = 0U;
 static uint8_t g_menu_latch = 0U;
-static uint8_t g_capture_mode = 0U;
-static uint8_t g_capture_hold_count = 0U;
-static uint8_t g_capture_lost_count = 0U;
-static uint8_t g_upright_locked = 0U;
-static uint8_t g_zero_set_ok = 1U;
 static uint8_t g_calibration_mode = 1U;
-static int32_t g_right_home_enc = ENC_RAW_RIGHT_WALL;
+static int32_t g_right_home_enc = CARTPOLE_ENCODER_RIGHT_WALL_TICKS;
 static uint8_t g_home_return_active = 0U;
 static ControlMode g_remote_mode = CONTROL_MODE_IDLE;
 static float g_remote_u = 0.0f;
 static uint8_t g_remote_active_dbg = 0U;
 static uint8_t g_rail_blocked = 0U;
-static uint8_t g_jog_active_dbg = 0U;
+static int32_t g_control_center_enc = 0;
+static uint8_t g_control_center_valid = 0U;
+static HybridController g_controller;
+static PendulumSequence g_sequence;
 
 extern ADC_HandleTypeDef hadc1;
-extern I2C_HandleTypeDef hi2c1;
-extern TIM_HandleTypeDef htim1;
 extern TIM_HandleTypeDef htim3;
 extern TIM_HandleTypeDef htim4;
 extern UART_HandleTypeDef huart1;
@@ -120,22 +65,27 @@ static void BootStageBlink(uint8_t times)
 
 static uint16_t ReadAngleAdc(void)
 {
-  uint32_t adc = 0U;
+  uint32_t adc_sum = 0U;
+  uint16_t adc;
+  uint8_t valid_samples = 0U;
+  uint8_t i;
 
-  HAL_ADC_Start(&hadc1);
-  if (HAL_ADC_PollForConversion(&hadc1, 5U) == HAL_OK) {
-    adc = HAL_ADC_GetValue(&hadc1);
+  for (i = 0U; i < CARTPOLE_ANGLE_ADC_AVERAGE_SAMPLES; ++i) {
+    HAL_ADC_Start(&hadc1);
+    if (HAL_ADC_PollForConversion(&hadc1, 5U) == HAL_OK) {
+      adc = (uint16_t)HAL_ADC_GetValue(&hadc1);
+      adc_sum += (uint32_t)((adc > 4095U) ? 4095U : adc);
+      valid_samples++;
+    }
+    HAL_ADC_Stop(&hadc1);
   }
-  HAL_ADC_Stop(&hadc1);
 
-  if (adc > 4095U) {
-    adc = 4095U;
-  }
-
-  return (uint16_t)adc;
+  return (valid_samples != 0U)
+       ? (uint16_t)(adc_sum / (uint32_t)valid_samples) : 0U;
 }
 
-static uint8_t ButtonPressedLatched(GPIO_TypeDef *port, uint16_t pin, uint8_t *latch)
+static uint8_t ButtonPressedLatched(GPIO_TypeDef *port, uint16_t pin,
+                                    uint8_t *latch)
 {
   GPIO_PinState key_state = HAL_GPIO_ReadPin(port, pin);
 
@@ -147,30 +97,7 @@ static uint8_t ButtonPressedLatched(GPIO_TypeDef *port, uint16_t pin, uint8_t *l
   } else {
     *latch = 0U;
   }
-
   return 0U;
-}
-
-static float ClampFloat(float v, float vmin, float vmax)
-{
-  if (v < vmin) {
-    return vmin;
-  }
-  if (v > vmax) {
-    return vmax;
-  }
-  return v;
-}
-
-static float WrapPi(float x)
-{
-  while (x > 3.1415926f) {
-    x -= 2.0f * 3.1415926f;
-  }
-  while (x < -3.1415926f) {
-    x += 2.0f * 3.1415926f;
-  }
-  return x;
 }
 
 static float UnwrapThetaSample(float theta_wrapped)
@@ -185,374 +112,286 @@ static float UnwrapThetaSample(float theta_wrapped)
   }
 
   delta = theta_wrapped - g_prev_theta_wrapped_rad;
-  if (delta > 3.1415926f) {
-    delta -= 2.0f * 3.1415926f;
-  } else if (delta < -3.1415926f) {
-    delta += 2.0f * 3.1415926f;
+  if (delta > CARTPOLE_PI_F) {
+    delta -= 2.0f * CARTPOLE_PI_F;
+  } else if (delta < -CARTPOLE_PI_F) {
+    delta += 2.0f * CARTPOLE_PI_F;
   }
 
   g_theta_unwrapped_rad += delta;
   g_prev_theta_wrapped_rad = theta_wrapped;
-
   return g_theta_unwrapped_rad;
-}
-
-static float ThetaErrFromUpright(float theta)
-{
-  return WrapPi(theta - UPRIGHT_ANGLE_RAD);
-}
-
-static float SignWithFallback(float v, float fallback)
-{
-  if (v > 0.0f) {
-    return 1.0f;
-  }
-  if (v < 0.0f) {
-    return -1.0f;
-  }
-  return (fallback >= 0.0f) ? 1.0f : -1.0f;
-}
-
-static float ApplySwingWindowClamp(float u_cmd, float x_err, float x_dot)
-{
-  float x_over;
-  float u_return;
-
-  if (x_err > (float)SWINGUP_WINDOW_HALF_TICKS) {
-    x_over = x_err - (float)SWINGUP_WINDOW_HALF_TICKS;
-    u_return = -(SWINGUP_RETURN_KX * x_over + SWINGUP_RETURN_KDX * x_dot);
-    return ClampFloat(u_return, -SWINGUP_RETURN_U_MAX, 0.0f);
-  }
-
-  if (x_err < -(float)SWINGUP_WINDOW_HALF_TICKS) {
-    x_over = x_err + (float)SWINGUP_WINDOW_HALF_TICKS;
-    u_return = -(SWINGUP_RETURN_KX * x_over + SWINGUP_RETURN_KDX * x_dot);
-    return ClampFloat(u_return, 0.0f, SWINGUP_RETURN_U_MAX);
-  }
-
-  return ClampFloat(u_cmd, -SWINGUP_MAX_U, SWINGUP_MAX_U);
-}
-
-static float ComputeSwingUpULegacy(float x_err, float x_dot, float theta, float dtheta)
-{
-  const float k_x = 0.000010f;
-  const float k_dx = 0.00110f;
-  const float energy_target = 2.0f * GRAVITY_MPS2 * PENDULUM_LENGTH_M;
-  float energy;
-  float energy_err;
-  float phase;
-  float phase_sign;
-  float pump_u;
-  float u_energy;
-  float u_center;
-  float u;
-
-  energy = (0.5f * PENDULUM_LENGTH_M * PENDULUM_LENGTH_M * dtheta * dtheta)
-         + (GRAVITY_MPS2 * PENDULUM_LENGTH_M * (1.0f - cosf(theta)));
-  energy_err = energy_target - energy;
-
-  phase = dtheta * cosf(theta);
-  phase_sign = SignWithFallback(phase, theta);
-
-  pump_u = (SWINGUP_ENERGY_TO_U * energy_err);
-  if (energy_err > 0.0f) {
-    pump_u += SWINGUP_MIN_PUMP_U;
-  }
-  pump_u = ClampFloat(pump_u, -SWINGUP_MAX_U, SWINGUP_MAX_U);
-  u_energy = SWINGUP_U_SIGN * phase_sign * pump_u;
-
-  if ((fabsf(theta) < SWINGUP_KICK_TH_RAD) && (fabsf(dtheta) < SWINGUP_KICK_DTH_RAD_S)) {
-    u_energy += SWINGUP_U_SIGN * SWINGUP_KICK_U * SignWithFallback(theta, 1.0f);
-  }
-
-  (void)CART_MASS_KG;
-
-  u_center = -(k_x * x_err + k_dx * x_dot);
-
-  u = u_energy + u_center;
-  return ApplySwingWindowClamp(u, x_err, x_dot);
-}
-
-static float ComputeSwingUpUSim(float x_err, float x_dot, float theta, float dtheta)
-{
-  const float l = PENDULUM_LENGTH_M;
-  const float energy_target = 2.0f * GRAVITY_MPS2 * l;
-  float energy;
-  float energy_err;
-  float u;
-
-  energy = (0.5f * l * l * dtheta * dtheta)
-         + (GRAVITY_MPS2 * l * (1.0f - cosf(theta)));
-  energy_err = energy - energy_target;
-
-  u = -(SIM_SWINGUP_K_E * energy_err * dtheta * cosf(theta))
-    - (SIM_SWINGUP_K_X * x_err)
-    - (SIM_SWINGUP_K_V * x_dot);
-
-  u = ClampFloat(u, -SIM_SWINGUP_U_MAX, SIM_SWINGUP_U_MAX);
-  return ApplySwingWindowClamp(u, x_err, x_dot);
-}
-
-static float ComputeSwingUpU(float x_err, float x_dot, float theta, float dtheta)
-{
-#if (SWINGUP_CTRL_PROFILE == SWINGUP_CTRL_PROFILE_SIM)
-  return ComputeSwingUpUSim(x_err, x_dot, theta, dtheta);
-#else
-  return ComputeSwingUpULegacy(x_err, x_dot, theta, dtheta);
-#endif
-}
-
-static float ApplySlewRate(float target_u)
-{
-  const float du_max = 0.35f;
-  float du = target_u - g_prev_u;
-
-  if (du > du_max) {
-    du = du_max;
-  } else if (du < -du_max) {
-    du = -du_max;
-  }
-
-  g_prev_u += du;
-  return g_prev_u;
-}
-
-static uint8_t IsSoftRailBlocked(int32_t enc_pos, float u_cmd)
-{
-  if ((enc_pos >= (ENC_RAW_LEFT_WALL - ENC_WALL_MARGIN_TICKS)) && (u_cmd > 0.0f)) {
-    return 1U;
-  }
-
-  if ((enc_pos <= (ENC_RAW_RIGHT_WALL + ENC_WALL_MARGIN_TICKS)) && (u_cmd < 0.0f)) {
-    return 1U;
-  }
-
-  return 0U;
 }
 
 static uint8_t TrySetZero(uint16_t adc_now)
 {
-#if POT_ZERO_STRICT_WINDOW
-  if ((adc_now < POT_ZERO_MIN_ADC) || (adc_now > POT_ZERO_MAX_ADC)) {
-    g_zero_set_ok = 0U;
+#if CARTPOLE_POT_ZERO_STRICT_WINDOW
+  if ((adc_now < CARTPOLE_POT_ZERO_MIN_ADC)
+      || (adc_now > CARTPOLE_POT_ZERO_MAX_ADC)) {
     return 0U;
   }
 #endif
-
   g_angle_zero_adc = (float)adc_now;
-  g_zero_set_ok = 1U;
   return 1U;
 }
 
 static void BlinkSetZeroResult(uint8_t ok)
 {
-  if (ok != 0U) {
+  HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+  delay_ms((ok != 0U) ? 35U : 25U);
+  HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+
+  if (ok == 0U) {
+    delay_ms(25U);
     HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
-    delay_ms(35);
+    delay_ms(25U);
     HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
-  } else {
-    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
-    delay_ms(25);
-    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
-    delay_ms(25);
-    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
-    delay_ms(25);
-    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+  }
+}
+
+/* Differencing across a multi-frame window keeps the old 20 ms resolution
+ * on ADC/encoder quantisation while refreshing the estimate every frame. */
+static void UpdateRateEstimates(uint32_t now_ms)
+{
+  uint8_t oldest;
+  uint32_t elapsed_ms;
+  float elapsed_s;
+
+  g_curr_dtheta_rad_s = 0.0f;
+  g_curr_x_vel = 0.0f;
+  if (g_history_count != 0U) {
+    oldest = (g_history_count < CARTPOLE_RATE_WINDOW_SAMPLES)
+           ? 0U : g_history_index;
+    elapsed_ms = now_ms - g_tick_history_ms[oldest];
+    if (elapsed_ms != 0U) {
+      elapsed_s = (float)elapsed_ms / 1000.0f;
+      g_curr_dtheta_rad_s = (g_curr_theta_rad - g_theta_history_rad[oldest])
+                          / elapsed_s;
+      g_curr_x_vel = (float)(g_curr_enc - g_enc_history[oldest]) / elapsed_s;
+    }
+  }
+
+  g_theta_history_rad[g_history_index] = g_curr_theta_rad;
+  g_enc_history[g_history_index] = g_curr_enc;
+  g_tick_history_ms[g_history_index] = now_ms;
+  g_history_index = (uint8_t)((g_history_index + 1U)
+                              % CARTPOLE_RATE_WINDOW_SAMPLES);
+  if (g_history_count < CARTPOLE_RATE_WINDOW_SAMPLES) {
+    g_history_count++;
+  }
+
+  g_filt_dtheta_rad_s = 0.5f * g_filt_dtheta_rad_s
+                      + 0.5f * g_curr_dtheta_rad_s;
+}
+
+/* Fixed-rate scheduling: frame work time does not stretch the period. */
+static void WaitForNextFrame(void)
+{
+  static uint32_t next_frame_ms = 0U;
+  static uint8_t scheduler_started = 0U;
+  uint32_t now_ms = HAL_GetTick();
+
+  if (scheduler_started == 0U) {
+    next_frame_ms = now_ms;
+    scheduler_started = 1U;
+  }
+  next_frame_ms += CARTPOLE_CONTROL_PERIOD_MS;
+  if ((int32_t)(next_frame_ms - now_ms) <= 0) {
+    /* Overrun (e.g. blocking LED feedback): resync, no catch-up burst. */
+    next_frame_ms = now_ms;
+    return;
+  }
+  while ((int32_t)(next_frame_ms - HAL_GetTick()) > 0) {
+  }
+}
+
+static void ResetMotionEstimates(void)
+{
+  g_history_index = 0U;
+  g_history_count = 0U;
+  g_curr_dtheta_rad_s = 0.0f;
+  g_filt_dtheta_rad_s = 0.0f;
+  g_curr_theta_rad = 0.0f;
+  g_prev_theta_wrapped_rad = 0.0f;
+  g_theta_unwrapped_rad = 0.0f;
+  g_theta_unwrap_init = 0U;
+  g_prev_enc_raw = (uint16_t)__HAL_TIM_GET_COUNTER(&htim4);
+  g_curr_x_vel = 0.0f;
+}
+
+static void StopAutomaticSequence(void)
+{
+  PendulumSequence_Stop(&g_sequence);
+  g_calibration_mode = 1U;
+  g_run_enabled = 0U;
+  g_curr_u = 0.0f;
+  HybridController_Reset(&g_controller);
+  Motor_Stop();
+}
+
+static void StartAutomaticCalibration(void)
+{
+  PendulumSequence_StartCalibration(&g_sequence);
+  g_calibration_mode = 1U;
+  g_run_enabled = 0U;
+  g_control_center_valid = 0U;
+  g_curr_u = 0.0f;
+  HybridController_Reset(&g_controller);
+  Motor_Stop();
+}
+
+static void UpdateAutomaticCalibration(void)
+{
+  PendulumSequenceEvent event;
+
+  event = PendulumSequence_Update(&g_sequence, g_curr_adc, g_curr_enc);
+  if (event == PENDULUM_SEQUENCE_EVENT_CALIBRATED) {
+    g_angle_zero_adc = g_sequence.angle_zero_adc;
+    g_control_center_enc = g_sequence.control_center_encoder;
+    g_control_center_valid = 1U;
+    g_calibration_mode = 0U;
+    g_run_enabled = 1U;
+    g_curr_u = 0.0f;
+    HybridController_Reset(&g_controller);
+    ResetMotionEstimates();
+  } else if (event == PENDULUM_SEQUENCE_EVENT_CAL_TIMEOUT) {
+    g_calibration_mode = 1U;
+    g_run_enabled = 0U;
+    g_curr_u = 0.0f;
+    HybridController_Reset(&g_controller);
+    Motor_Stop();
   }
 }
 
 static void SetCalibrationMode(uint8_t enabled)
 {
   g_calibration_mode = (enabled != 0U) ? 1U : 0U;
+  if (g_calibration_mode != 0U) {
+    PendulumSequence_Stop(&g_sequence);
+  }
   g_run_enabled = 0U;
   g_curr_u = 0.0f;
-  g_prev_u = 0.0f;
-  g_upright_locked = 0U;
-  g_capture_mode = 0U;
-  g_capture_hold_count = 0U;
-  g_capture_lost_count = 0U;
-  g_jog_active_dbg = 0U;
   g_rail_blocked = 0U;
+  HybridController_Reset(&g_controller);
   Motor_Stop();
 }
 
 static void StartRightWallHoming(void)
 {
+  PendulumSequence_Stop(&g_sequence);
+  g_control_center_valid = 0U;
   g_home_return_active = 1U;
   g_calibration_mode = 0U;
   g_run_enabled = 1U;
   g_curr_u = 0.0f;
-  g_prev_u = 0.0f;
-  g_upright_locked = 0U;
-  g_capture_mode = 0U;
-  g_capture_hold_count = 0U;
-  g_capture_lost_count = 0U;
-  g_jog_active_dbg = 0U;
   g_rail_blocked = 0U;
+  HybridController_Reset(&g_controller);
 }
 
-static float ComputeRightWallHomeU(int32_t enc_pos)
+static float ComputeRightWallHomeU(int32_t encoder_position)
 {
   float remaining_ticks;
-  float norm;
+  float normalized_distance;
 
-  remaining_ticks = (float)(enc_pos - g_right_home_enc);
-  if (remaining_ticks <= (float)ENC_WALL_MARGIN_TICKS) {
+  remaining_ticks = (float)(encoder_position - g_right_home_enc);
+  if (remaining_ticks <= (float)CARTPOLE_RAIL_MARGIN_TICKS) {
     return 0.0f;
   }
 
-  norm = (remaining_ticks - (float)ENC_WALL_MARGIN_TICKS) / HOMING_DECAY_TICKS;
-  norm = ClampFloat(norm, 0.0f, 1.0f);
-  norm = norm * norm;
+  normalized_distance = (remaining_ticks - (float)CARTPOLE_RAIL_MARGIN_TICKS)
+                      / CARTPOLE_HOMING_DECAY_TICKS;
+  normalized_distance = CartpoleMath_Clamp(normalized_distance, 0.0f, 1.0f);
+  normalized_distance *= normalized_distance;
 
-  return HOMING_MIN_U + ((HOMING_MAX_U - HOMING_MIN_U) * norm);
+  return CARTPOLE_HOMING_MIN_U
+       + ((CARTPOLE_HOMING_MAX_U - CARTPOLE_HOMING_MIN_U)
+          * normalized_distance);
 }
 
-static int32_t GetCartPositionFromRightHome(void)
+static int32_t GetCartPositionFromControlCenter(void)
 {
-  return g_curr_enc - g_right_home_enc;
+  int32_t reference = (g_control_center_valid != 0U)
+                    ? g_control_center_enc : g_right_home_enc;
+  return g_curr_enc - reference;
 }
 
-static void UpdateUprightLock(float theta_err_abs, float dtheta_abs)
+static PendulumUiMode GetUiMode(uint8_t remote_active)
 {
-  if (g_upright_locked == 0U) {
-    if ((theta_err_abs < UPRIGHT_ENTER_TH_RAD) && (dtheta_abs < UPRIGHT_ENTER_DTH_RAD_S)) {
-      if (g_capture_hold_count < 255U) {
-        g_capture_hold_count++;
-      }
-    } else {
-      g_capture_hold_count = 0U;
-    }
-
-    if (g_capture_hold_count >= UPRIGHT_ENTER_TICKS) {
-      g_upright_locked = 1U;
-      g_capture_lost_count = 0U;
-    }
-  } else {
-    if ((theta_err_abs > UPRIGHT_EXIT_TH_RAD) || (dtheta_abs > UPRIGHT_EXIT_DTH_RAD_S)) {
-      if (g_capture_lost_count < 255U) {
-        g_capture_lost_count++;
-      }
-    } else {
-      g_capture_lost_count = 0U;
-    }
-
-    if (g_capture_lost_count >= UPRIGHT_EXIT_TICKS) {
-      g_upright_locked = 0U;
-      g_capture_hold_count = 0U;
-    }
+  if (g_home_return_active != 0U) {
+    return PENDULUM_UI_HOMING;
   }
-
-  g_capture_mode = g_upright_locked;
+  if (g_sequence.state == PENDULUM_SEQUENCE_CALIBRATING) {
+    return PENDULUM_UI_CALIBRATING;
+  }
+  if (g_sequence.state == PENDULUM_SEQUENCE_CAL_ERROR) {
+    return PENDULUM_UI_CAL_ERROR;
+  }
+  if ((g_sequence.state == PENDULUM_SEQUENCE_RUNNING)
+      || ((remote_active != 0U) && (g_run_enabled != 0U))) {
+    return (HybridController_IsCaptured(&g_controller) != 0U)
+         ? PENDULUM_UI_BALANCE : PENDULUM_UI_SWINGUP;
+  }
+  return PENDULUM_UI_IDLE;
 }
 
-static void UpdateOledAngle(void)
+static void RenderUi(uint8_t remote_active)
 {
-  const uint8_t *run_label = (g_home_return_active != 0U) ? (uint8_t *)"HOM" : ((g_calibration_mode != 0U) ? (uint8_t *)"CAL" : (uint8_t *)"RUN");
-  int32_t th_deg = (int32_t)(g_curr_theta_rad * (180.0f / 3.1415926f));
-  int32_t dth_deg = (int32_t)(g_curr_dtheta_rad_s * (180.0f / 3.1415926f));
-  int32_t u_pct = (int32_t)(g_curr_u * 100.0f);
-  int32_t x_curr_abs = GetCartPositionFromRightHome();
-  int32_t x_home_abs = g_right_home_enc;
-  int32_t x_dot = (int32_t)g_curr_x_vel;
-  uint16_t th_abs = (uint16_t)((th_deg >= 0) ? th_deg : -th_deg);
-  uint16_t dth_abs = (uint16_t)((dth_deg >= 0) ? dth_deg : -dth_deg);
-  uint16_t u_abs = (uint16_t)((u_pct >= 0) ? u_pct : -u_pct);
-  uint16_t x_dot_abs = (uint16_t)((x_dot >= 0) ? x_dot : -x_dot);
+  PendulumUiSnapshot snapshot;
 
-  OLED_Clear();
-  OLED_ShowString(0, 0, (uint8_t *)run_label);
-  OLED_ShowString(28, 0, (uint8_t *)(g_remote_active_dbg ? "R" : "L"));
-  OLED_ShowString(40, 0, (uint8_t *)"C:");
-  OLED_ShowNumber(56, 0, g_capture_mode, 1, 12);
-  OLED_ShowString(72, 0, (uint8_t *)"M:");
-  OLED_ShowNumber(88, 0, (uint16_t)g_remote_mode, 1, 12);
-
-  OLED_ShowString(0, 12, (uint8_t *)"ADC:");
-  OLED_ShowNumber(28, 12, g_curr_adc, 4, 12);
-  OLED_ShowString(70, 12, (uint8_t *)"Z:");
-  OLED_ShowNumber(84, 12, (uint16_t)g_angle_zero_adc, 4, 12);
-
-  OLED_ShowString(0, 24, (uint8_t *)"TH:");
-  OLED_ShowChar(20, 24, (th_deg >= 0) ? '+' : '-', 12, 1);
-  OLED_ShowNumber(28, 24, th_abs, 3, 12);
-  OLED_ShowString(56, 24, (uint8_t *)"d:");
-  OLED_ShowChar(72, 24, (dth_deg >= 0) ? '+' : '-', 12, 1);
-  OLED_ShowNumber(80, 24, dth_abs, 3, 12);
-
-  OLED_ShowString(0, 36, (uint8_t *)"U%:");
-  OLED_ShowChar(20, 36, (u_pct >= 0) ? '+' : '-', 12, 1);
-  OLED_ShowNumber(28, 36, u_abs, 3, 12);
-  OLED_ShowString(56, 36, (uint8_t *)"X:");
-  OLED_ShowChar(72, 36, (x_curr_abs >= 0) ? '+' : '-', 12, 1);
-  OLED_ShowNumber(80, 36, (uint16_t)((x_curr_abs >= 0) ? x_curr_abs : -x_curr_abs), 5, 12);
-
-  OLED_ShowString(0, 48, (uint8_t *)"HOME:");
-  OLED_ShowChar(20, 48, (x_home_abs >= 0) ? '+' : '-', 12, 1);
-  OLED_ShowNumber(28, 48, (uint16_t)((x_home_abs >= 0) ? x_home_abs : -x_home_abs), 5, 12);
-  OLED_ShowString(72, 48, (uint8_t *)"dX:");
-  OLED_ShowChar(96, 48, (x_dot >= 0) ? '+' : '-', 12, 1);
-  OLED_ShowNumber(104, 48, x_dot_abs, 4, 12);
-
-  OLED_Refresh_Gram();
+  snapshot.mode = GetUiMode(remote_active);
+  snapshot.remote_active = remote_active;
+  snapshot.capture_active = HybridController_IsCaptured(&g_controller);
+  snapshot.remote_mode = (uint8_t)g_remote_mode;
+  snapshot.angle_adc = g_curr_adc;
+  snapshot.angle_zero_adc = g_angle_zero_adc;
+  snapshot.angle_rad = g_curr_theta_rad;
+  snapshot.angle_rate_rad_s = g_curr_dtheta_rad_s;
+  snapshot.motor_command = g_curr_u;
+  snapshot.peak_motor_command = g_peak_abs_u;
+  snapshot.cart_position_ticks = GetCartPositionFromControlCenter();
+  snapshot.control_center_ticks = (g_control_center_valid != 0U)
+                                ? g_control_center_enc : g_right_home_enc;
+  snapshot.cart_velocity_ticks_s = g_curr_x_vel;
+  PendulumUi_Render(&snapshot);
+  g_peak_abs_u = 0.0f;
 }
 
 void PendulumApp_Init(void)
 {
   delay_ms(200);
-
   BootStageBlink(4U);
-
-  OLED_Init();
-  delay_ms(1000);
-  OLED_Clear();
+  PendulumUi_Init();
 
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_4);
   HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL);
-
   HAL_ADCEx_Calibration_Start(&hadc1);
 
-  Motor_Init(&htim3, TIM_CHANNEL_4, BIN1_GPIO_Port, BIN1_Pin, BIN2_GPIO_Port, BIN2_Pin);
-  Motor_SetDeadzonePwm(MOTOR_DEADZONE_FORWARD_PWM, MOTOR_DEADZONE_REVERSE_PWM);
+  Motor_Init(&htim3, TIM_CHANNEL_4,
+             BIN1_GPIO_Port, BIN1_Pin, BIN2_GPIO_Port, BIN2_Pin);
+  Motor_SetDeadzonePwm(CARTPOLE_MOTOR_DEADZONE_FORWARD_PWM,
+                       CARTPOLE_MOTOR_DEADZONE_REVERSE_PWM);
   Motor_Stop();
 
-  g_curr_enc = (int32_t)__HAL_TIM_GET_COUNTER(&htim4);
+  g_curr_enc = (int32_t)(int16_t)__HAL_TIM_GET_COUNTER(&htim4);
   g_prev_enc_raw = (uint16_t)__HAL_TIM_GET_COUNTER(&htim4);
-
+  HybridController_Init(&g_controller);
+  PendulumSequence_Init(&g_sequence);
   Comms_Init(&huart1);
-
-  g_angle_zero_adc = ANGLE_ZERO_DEFAULT_ADC;
-
-  OLED_Clear();
-  OLED_ShowString(0, 0, (uint8_t *)"BOOT OK");
-  OLED_ShowString(0, 12, (uint8_t *)"SWUP READY");
-  OLED_ShowString(0, 24, (uint8_t *)"USER:RUN/STOP");
-  OLED_ShowString(0, 36, (uint8_t *)"MENU:SET ZERO");
-  OLED_Refresh_Gram();
-  delay_ms(1200);
-
-  OLED_Clear();
-  OLED_ShowString(0, 12, (uint8_t *)"USER RUN/STOP");
-  OLED_ShowString(0, 24, (uint8_t *)"MENU SET ZERO");
-  OLED_ShowString(0, 36, (uint8_t *)"RES:CAL  HOLD:HOME");
-  OLED_Refresh_Gram();
+  PendulumUi_ShowStartup();
 }
 
 void PendulumApp_RunFrame(void)
 {
   static uint8_t oled_div = 0U;
-  static uint8_t local_run_latched = 0U;
-  static uint8_t user_force_stop = 0U;
   static uint16_t remote_miss_ticks = 0xFFFFU;
   static uint16_t reserved_key_hold_ticks = 0U;
   float theta_wrapped_rad;
   float u_cmd = 0.0f;
-  float theta_err_abs;
-  uint16_t enc_raw;
-  int16_t enc_delta;
-  ControlCommandData cmd;
-  RobotStateData telem;
-  uint8_t remote_active = 0U;
+  uint16_t encoder_raw;
+  int16_t encoder_delta;
+  ControlCommandData command;
+  RobotStateData telemetry;
+  uint8_t remote_active;
   uint8_t jog_plus_held;
   uint8_t jog_minus_held;
   uint8_t jog_active = 0U;
@@ -560,162 +399,152 @@ void PendulumApp_RunFrame(void)
   Comms_Process();
 
   g_curr_adc = ReadAngleAdc();
-  theta_wrapped_rad = (((float)g_curr_adc) - g_angle_zero_adc) * ADC_TO_RAD;
+  theta_wrapped_rad = ((float)g_curr_adc - g_angle_zero_adc)
+                    * CARTPOLE_ADC_TO_RAD;
   g_curr_theta_rad = UnwrapThetaSample(theta_wrapped_rad);
-  g_curr_dtheta_rad_s = (g_curr_theta_rad - g_prev_theta_rad) / ((float)CONTROL_PERIOD_MS / 1000.0f);
-  g_prev_theta_rad = g_curr_theta_rad;
-  g_filt_dtheta_rad_s = 0.55f * g_filt_dtheta_rad_s + 0.45f * g_curr_dtheta_rad_s;
-  theta_err_abs = fabsf(ThetaErrFromUpright(g_curr_theta_rad));
 
-  UpdateUprightLock(theta_err_abs, fabsf(g_filt_dtheta_rad_s));
+  encoder_raw = (uint16_t)__HAL_TIM_GET_COUNTER(&htim4);
+  encoder_delta = (int16_t)(encoder_raw - g_prev_enc_raw);
+  g_prev_enc_raw = encoder_raw;
+  g_curr_enc += (int32_t)encoder_delta;
 
-  enc_raw = (uint16_t)__HAL_TIM_GET_COUNTER(&htim4);
-  enc_delta = (int16_t)(enc_raw - g_prev_enc_raw);
-  g_prev_enc_raw = enc_raw;
-  g_curr_enc = (int32_t)enc_raw;
-  g_curr_x_vel = ((float)enc_delta) / ((float)CONTROL_PERIOD_MS / 1000.0f);
+  UpdateRateEstimates(HAL_GetTick());
+  HybridController_UpdateCapture(&g_controller, g_curr_theta_rad,
+                                  g_filt_dtheta_rad_s);
 
-  if (Comms_GetLatestCommand(&cmd) != 0U) {
-    g_remote_mode = cmd.mode;
-    g_remote_u = ClampFloat(cmd.control_effort, -1.0f, 1.0f);
+  if (Comms_GetLatestCommand(&command) != 0U) {
+    g_remote_mode = command.mode;
+    g_remote_u = CartpoleMath_Clamp(command.control_effort, -1.0f, 1.0f);
     remote_miss_ticks = 0U;
   } else if (remote_miss_ticks < 0xFFFFU) {
     remote_miss_ticks++;
   }
-
-  remote_active = (remote_miss_ticks <= (COMMAND_TIMEOUT_MS / CONTROL_PERIOD_MS)) ? 1U : 0U;
+  remote_active = (remote_miss_ticks
+      <= (CARTPOLE_COMMAND_TIMEOUT_MS / CARTPOLE_CONTROL_PERIOD_MS)) ? 1U : 0U;
   g_remote_active_dbg = remote_active;
 
-  jog_plus_held = (HAL_GPIO_ReadPin(pid_plus_GPIO_Port, pid_plus_Pin) == GPIO_PIN_RESET) ? 1U : 0U;
-  jog_minus_held = (HAL_GPIO_ReadPin(pid_reduce_GPIO_Port, pid_reduce_Pin) == GPIO_PIN_RESET) ? 1U : 0U;
+  jog_plus_held = (HAL_GPIO_ReadPin(pid_plus_GPIO_Port, pid_plus_Pin)
+                    == GPIO_PIN_RESET) ? 1U : 0U;
+  jog_minus_held = (HAL_GPIO_ReadPin(pid_reduce_GPIO_Port, pid_reduce_Pin)
+                     == GPIO_PIN_RESET) ? 1U : 0U;
 
-  if (ButtonPressedLatched(User_key_GPIO_Port, User_key_Pin, &g_user_latch) != 0U) {
-    user_force_stop = (user_force_stop == 0U) ? 1U : 0U;
+  if (ButtonPressedLatched(User_key_GPIO_Port, User_key_Pin,
+                           &g_user_latch) != 0U) {
+    g_remote_mode = CONTROL_MODE_IDLE;
+    g_remote_u = 0.0f;
+    remote_miss_ticks = 0xFFFFU;
+    remote_active = 0U;
+    g_remote_active_dbg = 0U;
 
-    if (user_force_stop != 0U) {
-      local_run_latched = 0U;
-      g_remote_mode = CONTROL_MODE_IDLE;
-      g_remote_u = 0.0f;
-      remote_miss_ticks = 0xFFFFU;
-      g_remote_active_dbg = 0U;
-      g_run_enabled = 0U;
-      g_curr_u = 0.0f;
-      g_prev_u = 0.0f;
-      Motor_Stop();
+    if ((g_sequence.state == PENDULUM_SEQUENCE_CALIBRATING)
+        || (g_sequence.state == PENDULUM_SEQUENCE_RUNNING)) {
+      StopAutomaticSequence();
     } else {
-      local_run_latched = 1U;
-      g_remote_mode = CONTROL_MODE_IDLE;
-      g_remote_u = 0.0f;
-      remote_miss_ticks = 0xFFFFU;
-      g_remote_active_dbg = 0U;
+      StartAutomaticCalibration();
     }
   }
 
-  if (ButtonPressedLatched(menu_key_GPIO_Port, menu_key_Pin, &g_menu_latch) != 0U) {
+  if ((ButtonPressedLatched(menu_key_GPIO_Port, menu_key_Pin,
+                            &g_menu_latch) != 0U)
+      && (g_sequence.state != PENDULUM_SEQUENCE_RUNNING)
+      && (g_sequence.state != PENDULUM_SEQUENCE_CALIBRATING)) {
     BlinkSetZeroResult(TrySetZero(g_curr_adc));
   }
 
-  if (HAL_GPIO_ReadPin(reserved_key_GPIO_Port, reserved_key_Pin) == GPIO_PIN_RESET) {
+  UpdateAutomaticCalibration();
+  if ((g_sequence.state == PENDULUM_SEQUENCE_CALIBRATING)
+      || (g_sequence.state == PENDULUM_SEQUENCE_RUNNING)) {
+    remote_active = 0U;
+    g_remote_active_dbg = 0U;
+  }
+
+  if (HAL_GPIO_ReadPin(reserved_key_GPIO_Port,
+                       reserved_key_Pin) == GPIO_PIN_RESET) {
     if (reserved_key_hold_ticks < 0xFFFFU) {
       reserved_key_hold_ticks++;
     }
   } else if (reserved_key_hold_ticks > 0U) {
-    if (reserved_key_hold_ticks >= RESERVED_KEY_LONG_PRESS_TICKS) {
+    if (reserved_key_hold_ticks >= CARTPOLE_RESERVED_KEY_LONG_PRESS_SAMPLES) {
       StartRightWallHoming();
     } else {
       SetCalibrationMode((g_calibration_mode == 0U) ? 1U : 0U);
     }
-
     reserved_key_hold_ticks = 0U;
   }
 
   if (g_home_return_active != 0U) {
-    if (g_curr_enc <= (g_right_home_enc + ENC_WALL_MARGIN_TICKS)) {
+    if (g_curr_enc <= (g_right_home_enc + CARTPOLE_RAIL_MARGIN_TICKS)) {
       g_home_return_active = 0U;
       g_run_enabled = 0U;
       g_curr_u = 0.0f;
-      g_prev_u = 0.0f;
+      HybridController_Reset(&g_controller);
       Motor_Stop();
     } else {
       u_cmd = ComputeRightWallHomeU(g_curr_enc);
-      g_curr_u = ApplySlewRate(u_cmd);
+      g_curr_u = HybridController_ApplySlew(&g_controller, u_cmd);
     }
-  } else if (g_calibration_mode != 0U) {
+  } else if ((g_sequence.state == PENDULUM_SEQUENCE_CALIBRATING)
+             || (g_calibration_mode != 0U)) {
     g_run_enabled = 0U;
     g_curr_u = 0.0f;
-    g_prev_u = 0.0f;
-    g_upright_locked = 0U;
-    g_capture_mode = 0U;
-    g_capture_hold_count = 0U;
-    g_capture_lost_count = 0U;
-    jog_active = 0U;
     g_rail_blocked = 0U;
-    Motor_Stop();
-  } else if (user_force_stop != 0U) {
-    g_run_enabled = 0U;
-    g_curr_u = 0.0f;
-    g_prev_u = 0.0f;
-    g_upright_locked = 0U;
-    g_capture_mode = 0U;
-    g_capture_hold_count = 0U;
-    g_capture_lost_count = 0U;
+    HybridController_Reset(&g_controller);
     Motor_Stop();
   } else if (remote_active != 0U) {
     g_run_enabled = (g_remote_mode != CONTROL_MODE_IDLE) ? 1U : 0U;
-
     if (g_run_enabled == 0U) {
       g_curr_u = 0.0f;
-      g_prev_u = 0.0f;
-      g_upright_locked = 0U;
-      g_capture_mode = 0U;
-      g_capture_hold_count = 0U;
-      g_capture_lost_count = 0U;
+      HybridController_Reset(&g_controller);
       Motor_Stop();
     } else {
-      if ((g_remote_mode == CONTROL_MODE_SWINGUP) || (g_remote_mode == CONTROL_MODE_LQR)) {
-        u_cmd = ComputeSwingUpU((float)GetCartPositionFromRightHome(), g_curr_x_vel, g_curr_theta_rad, g_filt_dtheta_rad_s);
+      if (g_remote_mode == CONTROL_MODE_SWINGUP) {
+        u_cmd = HybridController_ComputeSwingup(
+          &g_controller, (float)GetCartPositionFromControlCenter(),
+          g_curr_x_vel, g_curr_theta_rad, g_filt_dtheta_rad_s);
+      } else if (g_remote_mode == CONTROL_MODE_LQR) {
+        u_cmd = HybridController_Compute(
+          &g_controller, (float)GetCartPositionFromControlCenter(),
+          g_curr_x_vel, g_curr_theta_rad, g_filt_dtheta_rad_s);
       } else {
         u_cmd = g_remote_u;
       }
-
-      g_curr_u = ApplySlewRate(u_cmd);
+      g_curr_u = HybridController_ApplySlew(&g_controller, u_cmd);
     }
   } else {
-    g_run_enabled = local_run_latched;
-
+    g_run_enabled = (g_sequence.state == PENDULUM_SEQUENCE_RUNNING) ? 1U : 0U;
     if (g_run_enabled == 0U) {
       g_curr_u = 0.0f;
-      g_prev_u = 0.0f;
-      g_upright_locked = 0U;
-      g_capture_mode = 0U;
-      g_capture_hold_count = 0U;
-      g_capture_lost_count = 0U;
+      HybridController_Reset(&g_controller);
       Motor_Stop();
     } else {
-      u_cmd = ComputeSwingUpU((float)GetCartPositionFromRightHome(), g_curr_x_vel, g_curr_theta_rad, g_filt_dtheta_rad_s);
-
-      g_curr_u = ApplySlewRate(u_cmd);
+      u_cmd = HybridController_Compute(
+        &g_controller, (float)GetCartPositionFromControlCenter(),
+        g_curr_x_vel, g_curr_theta_rad, g_filt_dtheta_rad_s);
+      g_curr_u = HybridController_ApplySlew(&g_controller, u_cmd);
     }
   }
 
-  if ((g_home_return_active == 0U) && (remote_active == 0U) && (g_run_enabled == 0U) && (user_force_stop == 0U)) {
+  if ((g_home_return_active == 0U) && (remote_active == 0U)
+      && (g_run_enabled == 0U)
+      && (g_sequence.state != PENDULUM_SEQUENCE_CALIBRATING)) {
     if (jog_plus_held != jog_minus_held) {
       jog_active = 1U;
-      u_cmd = (jog_plus_held != 0U) ? JOG_U_CMD : -JOG_U_CMD;
-      g_curr_u = ApplySlewRate(u_cmd);
+      u_cmd = (jog_plus_held != 0U)
+            ? CARTPOLE_JOG_U : -CARTPOLE_JOG_U;
+      g_curr_u = HybridController_ApplySlew(&g_controller, u_cmd);
     } else {
       g_curr_u = 0.0f;
-      g_prev_u = 0.0f;
+      HybridController_Reset(&g_controller);
     }
   }
 
-  g_jog_active_dbg = jog_active;
-
-  if ((g_home_return_active != 0U) || (g_run_enabled != 0U) || (jog_active != 0U)) {
-    g_rail_blocked = IsSoftRailBlocked(g_curr_enc, g_curr_u);
+  if ((g_home_return_active != 0U) || (g_run_enabled != 0U)
+      || (jog_active != 0U)) {
+    g_rail_blocked = CartpoleSafety_IsRailBlocked(
+      g_curr_enc, g_curr_u, g_control_center_enc, g_control_center_valid);
     if (g_rail_blocked != 0U) {
       g_curr_u = 0.0f;
-      g_prev_u = 0.0f;
+      HybridController_Reset(&g_controller);
       Motor_Stop();
     } else {
       Motor_SetTorque(g_curr_u);
@@ -724,24 +553,37 @@ void PendulumApp_RunFrame(void)
     g_rail_blocked = 0U;
   }
 
-  g_jog_active_dbg = jog_active;
+  {
+    float abs_u = (g_curr_u >= 0.0f) ? g_curr_u : -g_curr_u;
+    if (abs_u > g_peak_abs_u) {
+      g_peak_abs_u = abs_u;
+    }
+  }
 
-  telem.x_pos = (float)g_curr_enc;
-  telem.x_vel = g_curr_x_vel;
-  telem.theta = g_curr_theta_rad;
-  telem.theta_vel = g_filt_dtheta_rad_s;
-  Comms_SendTelemetry(&telem);
+  telemetry.x_pos = (float)g_curr_enc;
+  telemetry.x_vel = g_curr_x_vel;
+  telemetry.theta = g_curr_theta_rad;
+  telemetry.theta_vel = g_filt_dtheta_rad_s;
+  telemetry.control_effort = g_curr_u;
+  telemetry.frame = (uint16_t)g_frame_count;
+  telemetry.flags = (uint8_t)(
+    ((HybridController_IsCaptured(&g_controller) != 0U)
+       ? TELEMETRY_FLAG_CAPTURED : 0U)
+    | ((g_run_enabled != 0U) ? TELEMETRY_FLAG_RUNNING : 0U)
+    | ((g_rail_blocked != 0U) ? TELEMETRY_FLAG_RAIL_BLOCKED : 0U));
+  Comms_SendTelemetry(&telemetry);
 
   g_frame_count++;
-  if ((g_frame_count % 10U) == 0U) {
+  if ((g_frame_count % CARTPOLE_LED_TOGGLE_SAMPLES) == 0U) {
     HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
   }
 
   oled_div++;
-  if (oled_div >= (OLED_PERIOD_MS / CONTROL_PERIOD_MS)) {
+  if (oled_div >= (CARTPOLE_OLED_PERIOD_MS / CARTPOLE_CONTROL_PERIOD_MS)) {
     oled_div = 0U;
-    UpdateOledAngle();
+    RenderUi(remote_active);
   }
+  PendulumUi_FlushStep();
 
-  delay_ms(CONTROL_PERIOD_MS);
+  WaitForNextFrame();
 }

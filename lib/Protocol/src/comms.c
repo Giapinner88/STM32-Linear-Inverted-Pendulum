@@ -13,6 +13,10 @@ typedef struct __attribute__((packed)) {
   float x_vel;
   float theta;
   float theta_vel;
+  float control_effort;
+  uint16_t frame;
+  uint8_t flags;
+  uint8_t checksum; /* Sum of all bytes after the header, modulo 256. */
 } RobotStatePacket;
 
 typedef struct __attribute__((packed)) {
@@ -153,6 +157,19 @@ void Comms_SendTelemetry(const RobotStateData *state)
   g_tx_pkt.x_vel = state->x_vel;
   g_tx_pkt.theta = state->theta;
   g_tx_pkt.theta_vel = state->theta_vel;
+  g_tx_pkt.control_effort = state->control_effort;
+  g_tx_pkt.frame = state->frame;
+  g_tx_pkt.flags = state->flags;
+  {
+    const uint8_t *bytes = (const uint8_t *)&g_tx_pkt;
+    uint8_t sum = 0U;
+    uint32_t i;
+
+    for (i = 2U; i < (sizeof(g_tx_pkt) - 1U); ++i) {
+      sum = (uint8_t)(sum + bytes[i]);
+    }
+    g_tx_pkt.checksum = sum;
+  }
 
   status = HAL_UART_Transmit_IT(g_huart, (uint8_t *)&g_tx_pkt, sizeof(g_tx_pkt));
   if (status == HAL_OK) {
