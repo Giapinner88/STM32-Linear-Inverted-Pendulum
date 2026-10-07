@@ -69,5 +69,5 @@ In the current setup, the reserved button is used to command a return to the fix
 
 - **Motor Control**: TIM3 Channel 4 (PWM), GPIO PB13/PB12 (direction)
 - **Encoder Input**: TIM4 in encoder mode, GPIO PB6/PB7
-- **Communication**: USART1 @ 128000 baud
+- **Communication**: USART1 @ 115200 baud
 - **Display**: SSD1306 OLED 128x64

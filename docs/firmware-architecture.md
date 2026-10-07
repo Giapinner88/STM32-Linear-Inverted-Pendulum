@@ -24,6 +24,16 @@ main loop on a fixed 5 ms deadline (the supplied firmware rate); TIM1 does not
 dispatch the controller. Angle and cart rates are differenced over a 4-frame
 (20 ms) window.
 Each frame averages ten ADC conversions, matching the supplied firmware.
+
+`PendulumApp_RunFrame` runs, in order: `ReadSensors`, `PollRemoteCommand`,
+`HandleUserAndMenuKeys`, `UpdateAutomaticCalibration`, `IsRemoteActive`,
+`HandleReservedKey`, `UpdateMotorCommand`, `DriveMotor`, `PublishTelemetry`,
+`UpdateIndicators` and `WaitForNextFrame`. The motor command source is chosen
+by priority: right-wall homing, calibration (motor off), PC link, automatic
+sequence, then manual jog when nothing else owns the motor. `DriveMotor`
+applies the rail guard to every source. The OLED is redrawn every 80 ms and
+flushed one page per frame so no frame blocks on the display.
+
 Calibration requires 500 ms of accepted averaged samples in the 990–1060 range, tolerates
 short rejected bursts, and reports `ERR` after approximately five seconds.
 

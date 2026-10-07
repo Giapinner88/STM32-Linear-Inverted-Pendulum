@@ -3,8 +3,10 @@
 
 Protocol:
 - Telemetry packet (MCU -> PC): 0xAA 0xBB + 5 floats (x_pos, x_vel, theta,
-  theta_vel, u) + uint16 frame + uint8 flags + uint8 checksum
+  theta_vel, u) + uint16 frame + uint8 flags + uint8 cmd_seq + int16
+  center_ticks + uint8 checksum (sum of bytes after the header)
 - Command packet (PC -> MCU): 0xCC 0xDD + float control_effort + uint8 mode
+  + uint8 seq + uint8 checksum (sum of the float, mode and seq bytes)
 """
 
 from __future__ import annotations
@@ -21,13 +23,15 @@ import serial
 
 TELEMETRY_HEADER = b"\xAA\xBB"
 COMMAND_HEADER = b"\xCC\xDD"
-TELEMETRY_FMT = "<2sfffffHBB"
-COMMAND_FMT = "<2sfB"
+TELEMETRY_FMT = "<2sfffffHBBhB"
+COMMAND_FMT = "<2sfBBB"
 TELEMETRY_SIZE = struct.calcsize(TELEMETRY_FMT)
 
 MODE_IDLE = 0
 MODE_SWINGUP = 1
 MODE_LQR = 2
+MODE_DIRECT = 3  # laptop u, honoured only while the MCU reports captured
+MODE_FULL = 4  # laptop u in every phase while the automatic sequence runs
 
 
 @dataclass
@@ -39,6 +43,8 @@ class Telemetry:
     u: float = 0.0
     frame: int = 0
     flags: int = 0
+    cmd_seq: int = 0
+    center_ticks: int = 0
 
 
 class PacketParser:
@@ -72,17 +78,19 @@ class PacketParser:
                 continue
             del self._buf[:TELEMETRY_SIZE]
 
-            (_, x_pos, x_vel, theta, theta_vel, u, frame, flags,
-             _) = struct.unpack(TELEMETRY_FMT, raw)
+            (_, x_pos, x_vel, theta, theta_vel, u, frame, flags, cmd_seq,
+             center_ticks, _) = struct.unpack(TELEMETRY_FMT, raw)
             out.append(Telemetry(x_pos=x_pos, x_vel=x_vel, theta=theta,
                                  theta_vel=theta_vel, u=u, frame=frame,
-                                 flags=flags))
+                                 flags=flags, cmd_seq=cmd_seq,
+                                 center_ticks=center_ticks))
 
 
-def build_command(control_effort: float, mode: int) -> bytes:
+def build_command(control_effort: float, mode: int, seq: int = 0) -> bytes:
     u = max(-1.0, min(1.0, control_effort))
-    m = mode if mode in (MODE_IDLE, MODE_SWINGUP, MODE_LQR) else MODE_IDLE
-    return struct.pack(COMMAND_FMT, COMMAND_HEADER, u, m)
+    m = mode if mode in (MODE_IDLE, MODE_SWINGUP, MODE_LQR, MODE_DIRECT, MODE_FULL) else MODE_IDLE
+    body = struct.pack("<fBB", u, m, seq & 0xFF)
+    return COMMAND_HEADER + body + bytes([sum(body) & 0xFF])
 
 
 def list_candidate_ports() -> list[str]:
@@ -172,7 +180,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="STM32 binary serial link test")
     p.add_argument("--port", default="/dev/ttyACM0", help="Serial port (e.g. /dev/ttyUSB0)")
     p.add_argument("--baud", type=int, default=115200, help="UART baud rate")
-    p.add_argument("--mode", type=int, default=MODE_IDLE, choices=[0, 1, 2], help="Control mode")
+    p.add_argument("--mode", type=int, default=MODE_IDLE, choices=[0, 1, 2, 3, 4], help="Control mode")
     p.add_argument("--u", type=float, default=0.0, help="Constant control effort in [-1,1]")
     p.add_argument("--tx-hz", type=float, default=100.0, help="Command transmit rate")
     p.add_argument("--sine", action="store_true", help="Send sinusoidal control effort")

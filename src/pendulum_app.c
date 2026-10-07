@@ -12,6 +12,8 @@
 #include "pendulum_ui.h"
 #include "swingup_controller.h"
 
+#include <math.h>
+
 static float g_angle_zero_adc = CARTPOLE_ANGLE_ZERO_DEFAULT_ADC;
 static float g_curr_dtheta_rad_s = 0.0f;
 static float g_filt_dtheta_rad_s = 0.0f;
@@ -39,7 +41,12 @@ static int32_t g_right_home_enc = CARTPOLE_ENCODER_RIGHT_WALL_TICKS;
 static uint8_t g_home_return_active = 0U;
 static ControlMode g_remote_mode = CONTROL_MODE_IDLE;
 static float g_remote_u = 0.0f;
-static uint8_t g_remote_active_dbg = 0U;
+static uint16_t g_remote_miss_frames = 0xFFFFU;
+static float g_direct_u = 0.0f;
+static uint16_t g_direct_age_frames = 0xFFFFU;
+static uint8_t g_direct_in_use = 0U;
+static ControlMode g_direct_mode = CONTROL_MODE_IDLE;
+static uint8_t g_last_cmd_seq = 0U;
 static uint8_t g_rail_blocked = 0U;
 static int32_t g_control_center_enc = 0;
 static uint8_t g_control_center_valid = 0U;
@@ -380,28 +387,15 @@ void PendulumApp_Init(void)
   PendulumUi_ShowStartup();
 }
 
-void PendulumApp_RunFrame(void)
+/* Samples the angle pot and encoder, then refreshes rates and capture. */
+static void ReadSensors(void)
 {
-  static uint8_t oled_div = 0U;
-  static uint16_t remote_miss_ticks = 0xFFFFU;
-  static uint16_t reserved_key_hold_ticks = 0U;
-  float theta_wrapped_rad;
-  float u_cmd = 0.0f;
   uint16_t encoder_raw;
   int16_t encoder_delta;
-  ControlCommandData command;
-  RobotStateData telemetry;
-  uint8_t remote_active;
-  uint8_t jog_plus_held;
-  uint8_t jog_minus_held;
-  uint8_t jog_active = 0U;
-
-  Comms_Process();
 
   g_curr_adc = ReadAngleAdc();
-  theta_wrapped_rad = ((float)g_curr_adc - g_angle_zero_adc)
-                    * CARTPOLE_ADC_TO_RAD;
-  g_curr_theta_rad = UnwrapThetaSample(theta_wrapped_rad);
+  g_curr_theta_rad = UnwrapThetaSample(
+    ((float)g_curr_adc - g_angle_zero_adc) * CARTPOLE_ADC_TO_RAD);
 
   encoder_raw = (uint16_t)__HAL_TIM_GET_COUNTER(&htim4);
   encoder_delta = (int16_t)(encoder_raw - g_prev_enc_raw);
@@ -411,33 +405,64 @@ void PendulumApp_RunFrame(void)
   UpdateRateEstimates(HAL_GetTick());
   HybridController_UpdateCapture(&g_controller, g_curr_theta_rad,
                                   g_filt_dtheta_rad_s);
+}
+
+static void PollRemoteCommand(void)
+{
+  ControlCommandData command;
 
   if (Comms_GetLatestCommand(&command) != 0U) {
     g_remote_mode = command.mode;
-    g_remote_u = CartpoleMath_Clamp(command.control_effort, -1.0f, 1.0f);
-    remote_miss_ticks = 0U;
-  } else if (remote_miss_ticks < 0xFFFFU) {
-    remote_miss_ticks++;
+    g_remote_u = (isfinite(command.control_effort) != 0)
+               ? CartpoleMath_Clamp(command.control_effort, -1.0f, 1.0f)
+               : 0.0f;
+    g_remote_miss_frames = 0U;
+    g_last_cmd_seq = command.seq;
+    if (((command.mode == CONTROL_MODE_DIRECT)
+         || (command.mode == CONTROL_MODE_FULL))
+        && (isfinite(command.control_effort) != 0)) {
+      g_direct_mode = command.mode;
+      g_direct_u = g_remote_u;
+      g_direct_age_frames = 0U;
+      return;
+    }
   }
-  remote_active = (remote_miss_ticks
-      <= (CARTPOLE_COMMAND_TIMEOUT_MS / CARTPOLE_CONTROL_PERIOD_MS)) ? 1U : 0U;
-  g_remote_active_dbg = remote_active;
+  if (g_remote_miss_frames < 0xFFFFU) {
+    g_remote_miss_frames++;
+  }
+  if (g_direct_age_frames < 0xFFFFU) {
+    g_direct_age_frames++;
+  }
+}
 
-  jog_plus_held = (HAL_GPIO_ReadPin(pid_plus_GPIO_Port, pid_plus_Pin)
-                    == GPIO_PIN_RESET) ? 1U : 0U;
-  jog_minus_held = (HAL_GPIO_ReadPin(pid_reduce_GPIO_Port, pid_reduce_Pin)
-                     == GPIO_PIN_RESET) ? 1U : 0U;
+static void DropRemoteControl(void)
+{
+  g_remote_mode = CONTROL_MODE_IDLE;
+  g_remote_u = 0.0f;
+  g_remote_miss_frames = 0xFFFFU;
+}
 
+static uint8_t IsSequenceBusy(void)
+{
+  return ((g_sequence.state == PENDULUM_SEQUENCE_CALIBRATING)
+          || (g_sequence.state == PENDULUM_SEQUENCE_RUNNING)) ? 1U : 0U;
+}
+
+/* The on-board sequence always has priority over a PC link. */
+static uint8_t IsRemoteActive(void)
+{
+  return ((g_remote_miss_frames
+           <= (CARTPOLE_COMMAND_TIMEOUT_MS / CARTPOLE_CONTROL_PERIOD_MS))
+          && (IsSequenceBusy() == 0U)) ? 1U : 0U;
+}
+
+/* USER starts/stops the automatic sequence; M1 re-zeroes the angle. */
+static void HandleUserAndMenuKeys(void)
+{
   if (ButtonPressedLatched(User_key_GPIO_Port, User_key_Pin,
                            &g_user_latch) != 0U) {
-    g_remote_mode = CONTROL_MODE_IDLE;
-    g_remote_u = 0.0f;
-    remote_miss_ticks = 0xFFFFU;
-    remote_active = 0U;
-    g_remote_active_dbg = 0U;
-
-    if ((g_sequence.state == PENDULUM_SEQUENCE_CALIBRATING)
-        || (g_sequence.state == PENDULUM_SEQUENCE_RUNNING)) {
+    DropRemoteControl();
+    if (IsSequenceBusy() != 0U) {
       StopAutomaticSequence();
     } else {
       StartAutomaticCalibration();
@@ -446,119 +471,173 @@ void PendulumApp_RunFrame(void)
 
   if ((ButtonPressedLatched(menu_key_GPIO_Port, menu_key_Pin,
                             &g_menu_latch) != 0U)
-      && (g_sequence.state != PENDULUM_SEQUENCE_RUNNING)
-      && (g_sequence.state != PENDULUM_SEQUENCE_CALIBRATING)) {
+      && (IsSequenceBusy() == 0U)) {
     BlinkSetZeroResult(TrySetZero(g_curr_adc));
   }
+}
 
-  UpdateAutomaticCalibration();
-  if ((g_sequence.state == PENDULUM_SEQUENCE_CALIBRATING)
-      || (g_sequence.state == PENDULUM_SEQUENCE_RUNNING)) {
-    remote_active = 0U;
-    g_remote_active_dbg = 0U;
-  }
+/* Reserved key: short press toggles calibration mode, long press homes. */
+static void HandleReservedKey(void)
+{
+  static uint16_t hold_frames = 0U;
 
   if (HAL_GPIO_ReadPin(reserved_key_GPIO_Port,
                        reserved_key_Pin) == GPIO_PIN_RESET) {
-    if (reserved_key_hold_ticks < 0xFFFFU) {
-      reserved_key_hold_ticks++;
+    if (hold_frames < 0xFFFFU) {
+      hold_frames++;
     }
-  } else if (reserved_key_hold_ticks > 0U) {
-    if (reserved_key_hold_ticks >= CARTPOLE_RESERVED_KEY_LONG_PRESS_SAMPLES) {
+  } else if (hold_frames > 0U) {
+    if (hold_frames >= CARTPOLE_RESERVED_KEY_LONG_PRESS_SAMPLES) {
       StartRightWallHoming();
     } else {
       SetCalibrationMode((g_calibration_mode == 0U) ? 1U : 0U);
     }
-    reserved_key_hold_ticks = 0U;
+    hold_frames = 0U;
   }
+}
 
+static void StopDrive(void)
+{
+  g_curr_u = 0.0f;
+  HybridController_Reset(&g_controller);
+  Motor_Stop();
+}
+
+static float ComputeHybridCommand(void)
+{
+  return HybridController_Compute(
+    &g_controller, (float)GetCartPositionFromControlCenter(),
+    g_curr_x_vel, g_curr_theta_rad, g_filt_dtheta_rad_s);
+}
+
+/* A fresh laptop command replaces the on-board one: in FULL mode in every
+ * phase, in DIRECT mode only while the pendulum is captured. The on-board
+ * hybrid controller keeps running so it can take over at once when the
+ * command goes stale. */
+static float ComputeSequenceCommand(void)
+{
+  float local_command = ComputeHybridCommand();
+  uint8_t laptop_owns = (g_direct_mode == CONTROL_MODE_FULL)
+                      || (HybridController_IsCaptured(&g_controller) != 0U);
+
+  g_direct_in_use = 0U;
+  if ((laptop_owns != 0U)
+      && (g_direct_age_frames
+          <= (CARTPOLE_DIRECT_TIMEOUT_MS / CARTPOLE_CONTROL_PERIOD_MS))) {
+    g_direct_in_use = 1U;
+    return g_direct_u;
+  }
+  return local_command;
+}
+
+static float ComputeRemoteCommand(void)
+{
+  if (g_remote_mode == CONTROL_MODE_SWINGUP) {
+    return HybridController_ComputeSwingup(
+      &g_controller, (float)GetCartPositionFromControlCenter(),
+      g_curr_x_vel, g_curr_theta_rad, g_filt_dtheta_rad_s);
+  }
+  if (g_remote_mode == CONTROL_MODE_LQR) {
+    return ComputeHybridCommand();
+  }
+  return g_remote_u;
+}
+
+/* Jog buttons move the cart only while nothing else owns the motor.
+ * Returns 1 while a jog is in progress. */
+static uint8_t UpdateJog(void)
+{
+  uint8_t plus_held = (HAL_GPIO_ReadPin(pid_plus_GPIO_Port, pid_plus_Pin)
+                       == GPIO_PIN_RESET) ? 1U : 0U;
+  uint8_t minus_held = (HAL_GPIO_ReadPin(pid_reduce_GPIO_Port, pid_reduce_Pin)
+                        == GPIO_PIN_RESET) ? 1U : 0U;
+
+  if (plus_held == minus_held) {
+    g_curr_u = 0.0f;
+    HybridController_Reset(&g_controller);
+    return 0U;
+  }
+  g_curr_u = HybridController_ApplySlew(
+    &g_controller, (plus_held != 0U) ? CARTPOLE_JOG_U : -CARTPOLE_JOG_U);
+  return 1U;
+}
+
+/* Chooses the command source by priority: homing, calibration, PC link,
+ * then the automatic sequence. Returns 1 when one of them drives the motor. */
+static uint8_t SelectControllerCommand(uint8_t remote_active)
+{
+  g_direct_in_use = 0U;
   if (g_home_return_active != 0U) {
     if (g_curr_enc <= (g_right_home_enc + CARTPOLE_RAIL_MARGIN_TICKS)) {
       g_home_return_active = 0U;
       g_run_enabled = 0U;
-      g_curr_u = 0.0f;
-      HybridController_Reset(&g_controller);
-      Motor_Stop();
-    } else {
-      u_cmd = ComputeRightWallHomeU(g_curr_enc);
-      g_curr_u = HybridController_ApplySlew(&g_controller, u_cmd);
+      StopDrive();
+      return 0U;
     }
-  } else if ((g_sequence.state == PENDULUM_SEQUENCE_CALIBRATING)
-             || (g_calibration_mode != 0U)) {
+    g_curr_u = HybridController_ApplySlew(
+      &g_controller, ComputeRightWallHomeU(g_curr_enc));
+    return 1U;
+  }
+
+  if ((g_sequence.state == PENDULUM_SEQUENCE_CALIBRATING)
+      || (g_calibration_mode != 0U)) {
     g_run_enabled = 0U;
-    g_curr_u = 0.0f;
     g_rail_blocked = 0U;
-    HybridController_Reset(&g_controller);
-    Motor_Stop();
-  } else if (remote_active != 0U) {
-    g_run_enabled = (g_remote_mode != CONTROL_MODE_IDLE) ? 1U : 0U;
-    if (g_run_enabled == 0U) {
-      g_curr_u = 0.0f;
-      HybridController_Reset(&g_controller);
-      Motor_Stop();
-    } else {
-      if (g_remote_mode == CONTROL_MODE_SWINGUP) {
-        u_cmd = HybridController_ComputeSwingup(
-          &g_controller, (float)GetCartPositionFromControlCenter(),
-          g_curr_x_vel, g_curr_theta_rad, g_filt_dtheta_rad_s);
-      } else if (g_remote_mode == CONTROL_MODE_LQR) {
-        u_cmd = HybridController_Compute(
-          &g_controller, (float)GetCartPositionFromControlCenter(),
-          g_curr_x_vel, g_curr_theta_rad, g_filt_dtheta_rad_s);
-      } else {
-        u_cmd = g_remote_u;
-      }
-      g_curr_u = HybridController_ApplySlew(&g_controller, u_cmd);
-    }
+    StopDrive();
+    return 0U;
+  }
+
+  if (remote_active != 0U) {
+    g_run_enabled = ((g_remote_mode == CONTROL_MODE_SWINGUP)
+                     || (g_remote_mode == CONTROL_MODE_LQR)) ? 1U : 0U;
   } else {
     g_run_enabled = (g_sequence.state == PENDULUM_SEQUENCE_RUNNING) ? 1U : 0U;
-    if (g_run_enabled == 0U) {
-      g_curr_u = 0.0f;
-      HybridController_Reset(&g_controller);
-      Motor_Stop();
-    } else {
-      u_cmd = HybridController_Compute(
-        &g_controller, (float)GetCartPositionFromControlCenter(),
-        g_curr_x_vel, g_curr_theta_rad, g_filt_dtheta_rad_s);
-      g_curr_u = HybridController_ApplySlew(&g_controller, u_cmd);
-    }
+  }
+  if (g_run_enabled != 0U) {
+    g_curr_u = HybridController_ApplySlew(
+      &g_controller, (remote_active != 0U) ? ComputeRemoteCommand()
+                                           : ComputeSequenceCommand());
+    return 1U;
   }
 
-  if ((g_home_return_active == 0U) && (remote_active == 0U)
-      && (g_run_enabled == 0U)
+  StopDrive();
+  return 0U;
+}
+
+/* Manual jog is allowed whenever no controller owns the motor, including
+ * calibration mode, but not during the PC link or auto-calibration. */
+static uint8_t UpdateMotorCommand(uint8_t remote_active)
+{
+  if (SelectControllerCommand(remote_active) != 0U) {
+    return 1U;
+  }
+  if ((remote_active == 0U)
       && (g_sequence.state != PENDULUM_SEQUENCE_CALIBRATING)) {
-    if (jog_plus_held != jog_minus_held) {
-      jog_active = 1U;
-      u_cmd = (jog_plus_held != 0U)
-            ? CARTPOLE_JOG_U : -CARTPOLE_JOG_U;
-      g_curr_u = HybridController_ApplySlew(&g_controller, u_cmd);
-    } else {
-      g_curr_u = 0.0f;
-      HybridController_Reset(&g_controller);
-    }
+    return UpdateJog();
   }
+  return 0U;
+}
 
-  if ((g_home_return_active != 0U) || (g_run_enabled != 0U)
-      || (jog_active != 0U)) {
-    g_rail_blocked = CartpoleSafety_IsRailBlocked(
-      g_curr_enc, g_curr_u, g_control_center_enc, g_control_center_valid);
-    if (g_rail_blocked != 0U) {
-      g_curr_u = 0.0f;
-      HybridController_Reset(&g_controller);
-      Motor_Stop();
-    } else {
-      Motor_SetTorque(g_curr_u);
-    }
-  } else {
+/* Rail guard sits between every command source and the H-bridge. */
+static void DriveMotor(uint8_t drive_active)
+{
+  if (drive_active == 0U) {
     g_rail_blocked = 0U;
+    return;
   }
 
-  {
-    float abs_u = (g_curr_u >= 0.0f) ? g_curr_u : -g_curr_u;
-    if (abs_u > g_peak_abs_u) {
-      g_peak_abs_u = abs_u;
-    }
+  g_rail_blocked = CartpoleSafety_IsRailBlocked(
+    g_curr_enc, g_curr_u, g_control_center_enc, g_control_center_valid);
+  if (g_rail_blocked != 0U) {
+    StopDrive();
+  } else {
+    Motor_SetTorque(g_curr_u);
   }
+}
+
+static void PublishTelemetry(void)
+{
+  RobotStateData telemetry;
 
   telemetry.x_pos = (float)g_curr_enc;
   telemetry.x_vel = g_curr_x_vel;
@@ -570,8 +649,21 @@ void PendulumApp_RunFrame(void)
     ((HybridController_IsCaptured(&g_controller) != 0U)
        ? TELEMETRY_FLAG_CAPTURED : 0U)
     | ((g_run_enabled != 0U) ? TELEMETRY_FLAG_RUNNING : 0U)
-    | ((g_rail_blocked != 0U) ? TELEMETRY_FLAG_RAIL_BLOCKED : 0U));
+    | ((g_rail_blocked != 0U) ? TELEMETRY_FLAG_RAIL_BLOCKED : 0U)
+    | ((g_direct_in_use != 0U) ? TELEMETRY_FLAG_DIRECT_ACTIVE : 0U));
+  telemetry.cmd_seq = g_last_cmd_seq;
+  telemetry.center_ticks = (g_control_center_valid != 0U)
+                         ? (int16_t)g_control_center_enc : 0;
   Comms_SendTelemetry(&telemetry);
+}
+
+static void UpdateIndicators(uint8_t remote_active)
+{
+  static uint8_t oled_div = 0U;
+
+  if (fabsf(g_curr_u) > g_peak_abs_u) {
+    g_peak_abs_u = fabsf(g_curr_u);
+  }
 
   g_frame_count++;
   if ((g_frame_count % CARTPOLE_LED_TOGGLE_SAMPLES) == 0U) {
@@ -584,6 +676,25 @@ void PendulumApp_RunFrame(void)
     RenderUi(remote_active);
   }
   PendulumUi_FlushStep();
+}
 
+void PendulumApp_RunFrame(void)
+{
+  uint8_t remote_active;
+  uint8_t drive_active;
+
+  Comms_Process();
+  ReadSensors();
+  PollRemoteCommand();
+  HandleUserAndMenuKeys();
+  UpdateAutomaticCalibration();
+  remote_active = IsRemoteActive();
+  HandleReservedKey();
+
+  drive_active = UpdateMotorCommand(remote_active);
+  DriveMotor(drive_active);
+
+  PublishTelemetry();
+  UpdateIndicators(remote_active);
   WaitForNextFrame();
 }

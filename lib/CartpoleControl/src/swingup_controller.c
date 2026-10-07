@@ -6,6 +6,20 @@
 
 #include <math.h>
 
+/* Wheeltec energy-shaping model, in the reference frame (x right, theta
+ * from upright). Kept verbatim from the supplied firmware. */
+#define SWINGUP_KINETIC_COEFF 0.0032f       /* E term on theta_dot^2 */
+#define SWINGUP_POTENTIAL_COEFF 0.1764f     /* m*g*l */
+#define SWINGUP_PUMP_ACCEL_M_S2 98.0f       /* relay acceleration */
+#define SWINGUP_CENTER_RANGE_M 0.15f        /* log barrier half-width */
+#define SWINGUP_CENTER_RATIO_MAX 0.95f
+#define SWINGUP_VOLT_PER_ACCEL 0.0651f
+#define SWINGUP_VOLT_PER_SPEED 11.5556f
+#define SWINGUP_REACTION_GAIN 0.0028f
+#define SWINGUP_PEND_ML 0.0180f
+#define SWINGUP_PEND_INERTIA 0.0012f
+#define SWINGUP_CENTRIPETAL_VOLT 0.8440f
+
 static float SignFloat(float value)
 {
   if (value > 0.0f) {
@@ -17,37 +31,26 @@ static float SignFloat(float value)
   return 0.0f;
 }
 
-static float ComputeCartReturn(SwingupController *controller,
+/* PD pull toward the centre along return_direction only. A command that
+ * would push outward is dropped (a cart moving inward fast may coast), and
+ * an inward command is raised to MIN_U to overcome static friction. */
+static float ComputeCartReturn(int8_t return_direction,
                                float position_ticks,
                                float velocity_ticks_s)
 {
-  float return_command;
+  float direction = (float)return_direction;
+  float inward_command;
 
-  if (controller->return_direction < 0) {
-    return_command = -(CARTPOLE_SWINGUP_RETURN_K_X * position_ticks
-                     + CARTPOLE_SWINGUP_RETURN_K_V * velocity_ticks_s);
-    return_command = CartpoleMath_Clamp(
-      return_command, -CARTPOLE_SWINGUP_RETURN_MAX_U, 0.0f);
-    if ((return_command < 0.0f)
-        && (return_command > -CARTPOLE_SWINGUP_RETURN_MIN_U)) {
-      return_command = -CARTPOLE_SWINGUP_RETURN_MIN_U;
-    }
-    return return_command;
+  inward_command = -direction * (CARTPOLE_SWINGUP_RETURN_K_X * position_ticks
+                                 + CARTPOLE_SWINGUP_RETURN_K_V
+                                   * velocity_ticks_s);
+  inward_command = CartpoleMath_Clamp(inward_command, 0.0f,
+                                      CARTPOLE_SWINGUP_RETURN_MAX_U);
+  if ((inward_command > 0.0f)
+      && (inward_command < CARTPOLE_SWINGUP_RETURN_MIN_U)) {
+    inward_command = CARTPOLE_SWINGUP_RETURN_MIN_U;
   }
-
-  if (controller->return_direction > 0) {
-    return_command = -(CARTPOLE_SWINGUP_RETURN_K_X * position_ticks
-                     + CARTPOLE_SWINGUP_RETURN_K_V * velocity_ticks_s);
-    return_command = CartpoleMath_Clamp(
-      return_command, 0.0f, CARTPOLE_SWINGUP_RETURN_MAX_U);
-    if ((return_command > 0.0f)
-        && (return_command < CARTPOLE_SWINGUP_RETURN_MIN_U)) {
-      return_command = CARTPOLE_SWINGUP_RETURN_MIN_U;
-    }
-    return return_command;
-  }
-
-  return 0.0f;
+  return direction * inward_command;
 }
 
 void SwingupController_Init(SwingupController *controller)
@@ -98,8 +101,9 @@ float SwingupController_Compute(SwingupController *controller,
   reference_velocity_m_s = reference_velocity_ticks_s
                          * CARTPOLE_ENCODER_METERS_PER_TICK;
 
-  energy = 0.0032f * reference_angle_rate_rad_s * reference_angle_rate_rad_s
-         + 0.1764f * (cosf(reference_angle_rad) - 1.0f);
+  energy = SWINGUP_KINETIC_COEFF
+           * reference_angle_rate_rad_s * reference_angle_rate_rad_s
+         + SWINGUP_POTENTIAL_COEFF * (cosf(reference_angle_rad) - 1.0f);
 
   if (controller->return_direction == 0) {
     if (reference_position_ticks
@@ -120,7 +124,8 @@ float SwingupController_Compute(SwingupController *controller,
   }
 
   if (controller->return_direction != 0) {
-    return ComputeCartReturn(controller, reference_position_ticks,
+    return ComputeCartReturn(controller->return_direction,
+                             reference_position_ticks,
                              reference_velocity_ticks_s);
   }
 
@@ -135,20 +140,22 @@ float SwingupController_Compute(SwingupController *controller,
     controller->pump_direction = (int8_t)SignFloat(energy * phase_signal);
   }
 
-  acceleration = 98.0f * (float)controller->pump_direction;
+  acceleration = SWINGUP_PUMP_ACCEL_M_S2 * (float)controller->pump_direction;
   position_ratio = CartpoleMath_Clamp(
-    fabsf(reference_position_m) / 0.15f, 0.0f, 0.95f);
+    fabsf(reference_position_m) / SWINGUP_CENTER_RANGE_M,
+    0.0f, SWINGUP_CENTER_RATIO_MAX);
   if (reference_position_m != 0.0f) {
     acceleration += SignFloat(reference_position_m)
                   * logf(1.0f - position_ratio);
   }
 
-  motor_voltage = 0.0651f * acceleration
-                + 11.5556f * reference_velocity_m_s
-                + (0.0028f * cosf(reference_angle_rad)
-                   * (0.1764f * sinf(reference_angle_rad)
-                      - 0.0180f * acceleration)) / 0.0012f
-                - 0.8440f * sinf(reference_angle_rad)
+  motor_voltage = SWINGUP_VOLT_PER_ACCEL * acceleration
+                + SWINGUP_VOLT_PER_SPEED * reference_velocity_m_s
+                + (SWINGUP_REACTION_GAIN * cosf(reference_angle_rad)
+                   * (SWINGUP_POTENTIAL_COEFF * sinf(reference_angle_rad)
+                      - SWINGUP_PEND_ML * acceleration))
+                  / SWINGUP_PEND_INERTIA
+                - SWINGUP_CENTRIPETAL_VOLT * sinf(reference_angle_rad)
                   * reference_angle_rate_rad_s * reference_angle_rate_rad_s;
 
   return CartpoleMath_Clamp(

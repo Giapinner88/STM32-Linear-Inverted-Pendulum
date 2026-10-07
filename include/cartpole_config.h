@@ -9,6 +9,9 @@
 #define CARTPOLE_LED_TOGGLE_SAMPLES CARTPOLE_MS_TO_SAMPLES(200U)
 #define CARTPOLE_OLED_PERIOD_MS 80U
 #define CARTPOLE_COMMAND_TIMEOUT_MS 250U
+/* Laptop-supplied balance command: older than this and the on-board LQR
+ * takes over again. */
+#define CARTPOLE_DIRECT_TIMEOUT_MS 30U
 #define CARTPOLE_PI_F 3.1415926f
 #define CARTPOLE_ANGLE_ADC_AVERAGE_SAMPLES 10U
 

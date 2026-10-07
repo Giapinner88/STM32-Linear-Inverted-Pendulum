@@ -91,8 +91,8 @@ The OLED is wired to both a software bit-bang SPI and I2C1 (hardware). Check `ol
 
 | Pin | Signal | Config |
 |-----|--------|--------|
-| PA9  | `USART1_TX` | 128000 baud, async |
-| PA10 | `USART1_RX` | 128000 baud, async |
+| PA9  | `USART1_TX` | 115200 baud, async |
+| PA10 | `USART1_RX` | 115200 baud, async |
 
 ---
 
@@ -162,7 +162,7 @@ HSE (8 MHz crystal)
 | Supply voltage | 12 V DC (battery pack) |
 | Control cycle | Nominal 20 ms cooperative main-loop frame; measured `dt` from HAL tick; 10-sample ADC average |
 | Motor driver | TB6612FNG (integrated on board), VM max 15 V, output avg 1.2 A, peak 3.2 A |
-| Communication | USART1 at 128000 baud — program download via MicroUSB, DataScope waveform display |
+| Communication | USART1 at 115200 baud — program download via MicroUSB, DataScope waveform display |
 | Display | 0.96" OLED 128×64 (I2C / bit-bang SPI) |
 
 ---

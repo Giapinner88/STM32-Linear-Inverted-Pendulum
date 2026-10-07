@@ -16,6 +16,8 @@ typedef struct __attribute__((packed)) {
   float control_effort;
   uint16_t frame;
   uint8_t flags;
+  uint8_t cmd_seq;
+  int16_t center_ticks;
   uint8_t checksum; /* Sum of all bytes after the header, modulo 256. */
 } RobotStatePacket;
 
@@ -23,6 +25,8 @@ typedef struct __attribute__((packed)) {
   uint8_t header[2];
   float control_effort;
   uint8_t mode;
+  uint8_t seq;
+  uint8_t checksum; /* Sum of control_effort, mode and seq bytes. */
 } ControlCommandPacket;
 
 typedef enum {
@@ -34,7 +38,8 @@ typedef enum {
 static UART_HandleTypeDef *g_huart = NULL;
 static volatile ControlCommandData g_latest_cmd = {0};
 static volatile CommsStats g_stats = {0};
-static uint8_t g_rx_dma_buf[16] = {0};
+static uint8_t g_rx_dma_buf[64] = {0};
+static uint16_t g_rx_tail = 0U;
 static uint8_t g_payload[sizeof(ControlCommandPacket) - 2U] = {0};
 static uint8_t g_payload_idx = 0U;
 static RxState g_rx_state = RX_WAIT_HEADER_0;
@@ -85,9 +90,26 @@ static void Comms_ParseByte(uint8_t b)
         pkt.header[1] = COMMAND_HEADER_1;
         memcpy(&pkt.control_effort, &g_payload[0], sizeof(float));
         pkt.mode = g_payload[sizeof(float)];
+        pkt.seq = g_payload[sizeof(float) + 1U];
+        pkt.checksum = g_payload[sizeof(float) + 2U];
+
+        {
+          uint8_t sum = 0U;
+          uint8_t i;
+
+          for (i = 0U; i < (sizeof(float) + 2U); ++i) {
+            sum = (uint8_t)(sum + g_payload[i]);
+          }
+          if (sum != pkt.checksum) {
+            g_stats.rx_errors++;
+            Comms_ResetParser();
+            break;
+          }
+        }
 
         g_latest_cmd.control_effort = pkt.control_effort;
-        g_latest_cmd.mode = (pkt.mode <= CONTROL_MODE_LQR) ? (ControlMode)pkt.mode : CONTROL_MODE_IDLE;
+        g_latest_cmd.mode = (pkt.mode <= CONTROL_MODE_FULL) ? (ControlMode)pkt.mode : CONTROL_MODE_IDLE;
+        g_latest_cmd.seq = pkt.seq;
         g_latest_cmd.timestamp_ms = HAL_GetTick();
         g_latest_cmd.is_fresh = 1U;
         g_stats.rx_packets++;
@@ -103,38 +125,35 @@ static void Comms_ParseByte(uint8_t b)
   }
 }
 
-static void Comms_ParseBuffer(const uint8_t *buf, uint16_t len)
-{
-  uint16_t i;
-
-  if (buf == NULL) {
-    return;
-  }
-
-  for (i = 0U; i < len; i++) {
-    Comms_ParseByte(buf[i]);
-  }
-}
-
 void Comms_Init(UART_HandleTypeDef *huart)
 {
   g_huart = huart;
   memset((void *)&g_stats, 0, sizeof(g_stats));
   memset((void *)&g_latest_cmd, 0, sizeof(g_latest_cmd));
   Comms_ResetParser();
+  g_rx_tail = 0U;
   Comms_StartRxDMA();
 }
 
+/* Drains whatever the circular RX DMA wrote since the previous call. */
 void Comms_Process(void)
 {
-  if (g_huart == NULL) {
+  uint16_t head;
+
+  if ((g_huart == NULL) || (g_huart->hdmarx == NULL)) {
     return;
   }
 
-  if ((g_huart->RxState == HAL_UART_STATE_READY) && (g_huart->hdmarx != NULL)) {
-    if (__HAL_DMA_GET_COUNTER(g_huart->hdmarx) == 0U) {
-      Comms_StartRxDMA();
-    }
+  if (g_huart->RxState != HAL_UART_STATE_BUSY_RX) {
+    g_rx_tail = 0U;
+    Comms_StartRxDMA();
+    return;
+  }
+
+  head = (uint16_t)(sizeof(g_rx_dma_buf) - __HAL_DMA_GET_COUNTER(g_huart->hdmarx));
+  while (g_rx_tail != head) {
+    Comms_ParseByte(g_rx_dma_buf[g_rx_tail]);
+    g_rx_tail = (uint16_t)((g_rx_tail + 1U) % sizeof(g_rx_dma_buf));
   }
 }
 
@@ -160,6 +179,8 @@ void Comms_SendTelemetry(const RobotStateData *state)
   g_tx_pkt.control_effort = state->control_effort;
   g_tx_pkt.frame = state->frame;
   g_tx_pkt.flags = state->flags;
+  g_tx_pkt.cmd_seq = state->cmd_seq;
+  g_tx_pkt.center_ticks = state->center_ticks;
   {
     const uint8_t *bytes = (const uint8_t *)&g_tx_pkt;
     uint8_t sum = 0U;
@@ -200,20 +221,13 @@ uint8_t Comms_GetLatestCommand(ControlCommandData *cmd)
   return has_new;
 }
 
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
-  if ((g_huart != NULL) && (huart == g_huart)) {
-    Comms_ParseBuffer(g_rx_dma_buf, sizeof(g_rx_dma_buf));
-    Comms_StartRxDMA();
-  }
-}
-
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
   if ((g_huart != NULL) && (huart == g_huart)) {
     g_stats.rx_errors++;
     HAL_UART_DMAStop(g_huart);
     Comms_ResetParser();
+    g_rx_tail = 0U;
     Comms_StartRxDMA();
   }
 }

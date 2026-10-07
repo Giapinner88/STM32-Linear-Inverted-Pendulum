@@ -21,6 +21,7 @@ from serial_link import PacketParser, list_candidate_ports
 FLAG_CAPTURED = 0x01
 FLAG_RUNNING = 0x02
 FLAG_RAIL_BLOCKED = 0x04
+FLAG_DIRECT_ACTIVE = 0x08
 
 
 def parse_args() -> argparse.Namespace:
@@ -58,7 +59,8 @@ def main() -> None:
         writer = csv.writer(fh)
         writer.writerow(["host_s", "frame", "x_ticks", "x_vel_ticks_s",
                          "theta_rad", "theta_vel_rad_s", "u",
-                         "captured", "running", "rail_blocked"])
+                         "captured", "running", "rail_blocked", "direct_active",
+                         "cmd_seq", "center_ticks"])
         try:
             while args.seconds <= 0 or time.monotonic() - t0 < args.seconds:
                 for t in parser.feed(ser.read(512)):
@@ -74,6 +76,8 @@ def main() -> None:
                         int(bool(t.flags & FLAG_CAPTURED)),
                         int(bool(t.flags & FLAG_RUNNING)),
                         int(bool(t.flags & FLAG_RAIL_BLOCKED)),
+                        int(bool(t.flags & FLAG_DIRECT_ACTIVE)),
+                        t.cmd_seq, t.center_ticks,
                     ])
                     if now - last_print >= 0.5:
                         last_print = now
