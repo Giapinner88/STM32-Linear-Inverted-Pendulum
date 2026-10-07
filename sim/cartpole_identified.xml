@@ -1,0 +1,54 @@
+<mujoco model="cartpole_identified">
+    <!-- Cart-pole with the parameters identified from the hardware logs
+         (parameters.md): pendulum omega^2 = 37.8 1/s^2, cart coupling 3.85 1/m,
+         viscous damping 0.15 1/s, rail travel +-0.2245 m (2065 encoder ticks).
+         The cart acts as an ideal acceleration source, as in the identified
+         model: it is made heavy so the pendulum cannot recoil it (the real
+         cart is geared and does not), and sim code applies
+         F = cart_mass * (12*u/KV - xdot)/TAU through the actuator. -->
+    <option timestep="0.0005" integrator="RK4" gravity="0 0 -9.81"/>
+
+    <visual>
+        <map znear="0.01" zfar="5"/>
+    </visual>
+
+    <worldbody>
+        <light pos="0 -2 3" dir="0 1 -1" directional="true" castshadow="true"/>
+        <geom name="floor" type="plane" size="2 2 0.1" rgba="0.8 0.9 0.8 1" contype="0" conaffinity="0"/>
+
+        <camera name="cam_side" pos="0 -1.6 1.1" xyaxes="1 0 0 0 0 1"/>
+
+        <geom name="rail" type="capsule" fromto="-0.2245 0 1.0  0.2245 0 1.0" size="0.006" rgba="0.3 0.3 0.3 1" contype="0" conaffinity="0"/>
+        <geom name="stop_left" type="box" pos="-0.2545 0 1.0" size="0.01 0.03 0.05" rgba="0.8 0.2 0.2 1" contype="0" conaffinity="0"/>
+        <geom name="stop_right" type="box" pos="0.2545 0 1.0" size="0.01 0.03 0.05" rgba="0.8 0.2 0.2 1" contype="0" conaffinity="0"/>
+
+        <body name="cart" pos="0 0 1.0">
+            <!-- A stiff, damped joint limit stands in for the end stop. -->
+            <joint name="slider" type="slide" axis="1 0 0" damping="0.0"
+                   limited="true" range="-0.2245 0.2245" solreflimit="0.004 1" solimplimit="0.95 0.99 0.001"/>
+
+            <inertial pos="0 0 0" mass="10.0" diaginertia="0.01 0.01 0.01"/>
+            <geom name="cart_geom" type="box" size="0.03 0.025 0.02" rgba="0.1 0.1 0.9 1" contype="0" conaffinity="0"/>
+
+            <body name="pole" pos="0 0 0">
+                <joint name="hinge" type="hinge" axis="0 1 0" pos="0 0 0" damping="1.74e-4"/>
+
+                <inertial pos="0 0 -0.1" mass="0.04467" diaginertia="7.1356e-4 7.1356e-4 7.1356e-4"/>
+
+                <geom type="cylinder" fromto="0 0 0  0 0 -0.2" size="0.006" rgba="0.5 0.5 0.5 1" contype="0" conaffinity="0"/>
+                <geom type="sphere" pos="0 0 -0.2" size="0.012" rgba="0.8 0.2 0.2 1" contype="0" conaffinity="0"/>
+            </body>
+        </body>
+    </worldbody>
+
+    <actuator>
+        <motor name="force_x" joint="slider" gear="1" ctrllimited="true" ctrlrange="-250.0 250.0"/>
+    </actuator>
+
+    <sensor>
+        <jointpos joint="slider" name="sens_x"/>
+        <jointvel joint="slider" name="sens_x_dot"/>
+        <jointpos joint="hinge" name="sens_theta"/>
+        <jointvel joint="hinge" name="sens_theta_dot"/>
+    </sensor>
+</mujoco>

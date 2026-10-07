@@ -3,3 +3,12 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+__pycache__/
+MUJOCO_LOG.TXT
+# Telemetry captures; run1/run2 are kept as the calibration evidence.
+logs/*
+!logs/run1.csv
+!logs/run2.csv
+# acados/CasADi environment for the NMPC experiments
+.venv-nmpc/
+nmpc/generated/
