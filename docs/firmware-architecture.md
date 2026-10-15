@@ -1,75 +1,53 @@
-# Firmware architecture
+# NMPC-only firmware contract
 
-The firmware is split so that board I/O, operating sequence, control laws, and
-display code can be inspected independently.
+## Ownership and changes (2026-10-15)
 
-## Runtime flow
+Specified: remove LQR/blend; one NMPC for all phases, no observer.
+Inherited: UART layout and FULL=4, 5 ms frame, pot/rate filtering, capture
+thresholds, slew limits, rail protection, calibration and manual controls.
+AI-selected replacement: expired laptop commands stop the H-bridge instead of
+switching to a local controller. This failure-policy change needs hardware
+revalidation after explicit flashing; it does not change the solver.
 
-```text
-USER button
-    -> PendulumSequence (IDLE -> CALIBRATING -> RUNNING)
-    -> PendulumApp reads ADC and encoder
-    -> HybridController
-         |-- SwingupController while the pendulum is away from upright
-         `-- LqrController after upright capture
-    -> CartpoleSafety rail guard
-    -> Motor_SetTorque
+- `src/pendulum_app.c`: sampling/filtering, command freshness, USER sequence,
+  command selection, rail guard and motor output.
+- `lib/CartpoleControl/src/drive_state.*`: capture hysteresis and slew only.
+- `lib/Protocol/src/comms.*`: UART; IDLE=0 and FULL=4; IDs 1..3 retired.
+- `include/cartpole_config.h`: timing, capture, slew and hardware limits.
+- `nmpc/nmpc_policy.py`: unchanged NMPC/warm-start/last-plan fallback.
+- `tools/laptop_control.py`: NMPC only; legacy `--nmpc` is a no-op alias.
 
-PendulumApp -> PendulumUi -> OLED
-```
+## Runtime and boundaries
 
-The physical USER button is active-low on `PA5`. M1/menu is on `PA7` and is not
-required for the automatic sequence. The control frame runs in the cooperative
-main loop on a fixed 5 ms deadline (the supplied firmware rate); TIM1 does not
-dispatch the controller. Angle and cart rates are differenced over a 4-frame
-(20 ms) window.
-Each frame averages ten ADC conversions, matching the supplied firmware.
+Pot/encoder → firmware filtering → UART → NMPC → FULL duty → slew → rail guard
+→ motor. Capture selects only the inherited slew limit/display, not a controller.
 
-`PendulumApp_RunFrame` runs, in order: `ReadSensors`, `PollRemoteCommand`,
-`HandleUserAndMenuKeys`, `UpdateAutomaticCalibration`, `IsRemoteActive`,
-`HandleReservedKey`, `UpdateMotorCommand`, `DriveMotor`, `PublishTelemetry`,
-`UpdateIndicators` and `WaitForNextFrame`. The motor command source is chosen
-by priority: right-wall homing, calibration (motor off), PC link, automatic
-sequence, then manual jog when nothing else owns the motor. `DriveMotor`
-applies the rail guard to every source. The OLED is redrawn every 80 ms and
-flushed one page per frame so no frame blocks on the display.
+USER calibration must finish before FULL drives the automatic sequence.
+The inherited age test allows <= 30/5 frames; expiry is on the next frame.
+On expiry `StopDrive()` zeros output immediately and resets slew/capture.
+There is no ramp or recovery controller. A fresh finite FULL command resumes
+if the USER sequence is still running. IDLE, non-finite and retired mode
+commands revoke the previous command immediately. USER stop, calibration
+inhibition, homing and jog keep their priority. Homing/jog are manual
+maintenance actions, never NMPC fallback.
 
-Calibration requires 500 ms of accepted averaged samples in the 990–1060 range, tolerates
-short rejected bursts, and reports `ERR` after approximately five seconds.
+A solver failure with a healthy link still uses `plan_command()`, the last
+good NMPC plan. This is distinct from losing UART commands.
 
-The Wheeltec reference coordinate is positive toward the right, while raw TIM4
-ticks increase toward the left. `cartpole_coordinates.c` performs this sign
-conversion for both swing-up and LQR. Motor commands keep the manufacturer
-driver convention: positive goes right and negative goes left. Rail safety uses
-raw ticks plus that motor-command convention explicitly.
+## Compatibility and verification boundary
 
-## Module map
+Sensing, OCP model/weights, solver timing, warm start, last-plan fallback and
+simulation capture scoring are unchanged. Healthy-link pure NMPC is intended
+to remain equivalent. LQR/blend baselines cannot be run here.
+Historical CSV/NPZ logs are retained; their older firmware behavior must not
+be attributed to the new firmware.
 
-| Path | Responsibility |
-| --- | --- |
-| `include/cartpole_config.h` | All controller gains, geometry, thresholds, timing, and limits |
-| `src/pendulum_app.c` | Nominal 20 ms main-loop orchestration, sensor acquisition, homing, remote commands, and actuator dispatch |
-| `src/pendulum_sequence.c` | One-button calibration/start/stop state machine |
-| `src/pendulum_ui.c` | OLED startup and runtime views |
-| `lib/CartpoleControl/src/swingup_controller.c` | Energy-shaping swing-up and cart return window |
-| `lib/CartpoleControl/src/lqr_controller.c` | Upright LQR control law and reference coordinate conversion |
-| `lib/CartpoleControl/src/hybrid_controller.c` | Swing-up/LQR capture hysteresis and output slew limiting |
-| `lib/CartpoleControl/src/cartpole_safety.c` | Dynamic and absolute rail-limit interlock |
-| `lib/CartpoleControl/src/cartpole_math.c` | Angle wrapping and scalar clamp helpers |
-| `lib/CartpoleControl/src/cartpole_coordinates.c` | Raw encoder to Wheeltec reference-coordinate conversion |
-| `lib/Hardware/src/motor.c` | PWM and H-bridge adapter |
-| `lib/Protocol/src/comms.c` | UART packet adapter |
-| `src/setup/` | STM32Cube-generated peripheral initialization and interrupts |
+Compilation and CLI checks are code/workflow checks, not closed-loop evidence.
+Hardware behavior and watchdog stopping are not yet physically revalidated.
+The board is not flashed automatically. Old LQR method/runbook/test documents
+are archived rather than kept as current instructions.
 
-`PendulumSequence` and every file in `CartpoleControl` are independent of the
-STM32 HAL. They can therefore be compiled and tested on the host using
-`tests/cartpole_control_smoke.c`.
-
-## Safe modification points
-
-- Tune only constants in `include/cartpole_config.h` first.
-- Change the swing-up law only in `swingup_controller.c`.
-- Change the balancing law only in `lqr_controller.c`.
-- Keep rail direction, motor polarity, and angle reference conversions explicit;
-  do not bury them in new gains.
-- Run both the host smoke test and `pio run` before flashing.
+Cleanup checks on 2026-10-15: PlatformIO build passed (Flash 22008 bytes,
+RAM 1924 bytes); hardware and simulation launcher `--help`, shell syntax and
+`git diff --check` passed. No simulation episode or hardware run was performed
+for this cleanup. Source deletions are intentional; no commit was created.

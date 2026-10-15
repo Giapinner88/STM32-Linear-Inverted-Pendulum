@@ -28,10 +28,73 @@ COMMAND_FMT = "<2sfBBB"
 TELEMETRY_SIZE = struct.calcsize(TELEMETRY_FMT)
 
 MODE_IDLE = 0
-MODE_SWINGUP = 1
-MODE_LQR = 2
-MODE_DIRECT = 3  # laptop u, honoured only while the MCU reports captured
 MODE_FULL = 4  # laptop u in every phase while the automatic sequence runs
+
+
+PI_F = 3.1415926
+UPRIGHT_OFFSET_RAD = 0.127
+UPRIGHT_ANGLE_RAD = PI_F + UPRIGHT_OFFSET_RAD
+METERS_PER_TICK = (0.036 * PI_F) / 1040.0
+
+# Capture hysteresis. Sample counts are control frames of 5 ms.
+CAPTURE_ENTER_ANGLE = 0.30
+CAPTURE_EXIT_ANGLE = 0.45
+CAPTURE_ENTER_RATE = 3.5
+CAPTURE_EXIT_RATE = 7.0
+CAPTURE_LEAD_S = 0.20
+CAPTURE_ENTER_PREDICT = 0.25
+CAPTURE_ENTER_SAMPLES = 2
+CAPTURE_EXIT_SAMPLES = 4
+
+
+SWINGUP_SLEW = 0.1125
+BALANCE_SLEW = 0.10
+
+def wrap_pi(angle: float) -> float:
+    while angle > PI_F:
+        angle -= 2.0 * PI_F
+    while angle < -PI_F:
+        angle += 2.0 * PI_F
+    return angle
+
+
+def theta_error(angle: float) -> float:
+    return wrap_pi(angle - UPRIGHT_ANGLE_RAD)
+
+
+@dataclass
+class Capture:
+    locked: bool = False
+    hold_count: int = 0
+    lost_count: int = 0
+
+    def reset(self) -> None:
+        self.locked = False
+        self.hold_count = 0
+        self.lost_count = 0
+
+    def update(self, angle: float, angle_rate: float) -> None:
+        err = theta_error(angle)
+        err_abs = abs(err)
+        rate_abs = abs(angle_rate)
+        if not self.locked:
+            if (err_abs < CAPTURE_ENTER_ANGLE and rate_abs < CAPTURE_ENTER_RATE
+                    and abs(err + CAPTURE_LEAD_S * angle_rate) < CAPTURE_ENTER_PREDICT):
+                self.hold_count = min(self.hold_count + 1, 255)
+            else:
+                self.hold_count = 0
+            if self.hold_count >= CAPTURE_ENTER_SAMPLES:
+                self.locked = True
+                self.lost_count = 0
+        else:
+            if err_abs > CAPTURE_EXIT_ANGLE or rate_abs > CAPTURE_EXIT_RATE:
+                self.lost_count = min(self.lost_count + 1, 255)
+            else:
+                self.lost_count = 0
+            if self.lost_count >= CAPTURE_EXIT_SAMPLES:
+                self.locked = False
+                self.hold_count = 0
+
 
 
 @dataclass
@@ -88,7 +151,7 @@ class PacketParser:
 
 def build_command(control_effort: float, mode: int, seq: int = 0) -> bytes:
     u = max(-1.0, min(1.0, control_effort))
-    m = mode if mode in (MODE_IDLE, MODE_SWINGUP, MODE_LQR, MODE_DIRECT, MODE_FULL) else MODE_IDLE
+    m = mode if mode in (MODE_IDLE, MODE_FULL) else MODE_IDLE
     body = struct.pack("<fBB", u, m, seq & 0xFF)
     return COMMAND_HEADER + body + bytes([sum(body) & 0xFF])
 
@@ -180,7 +243,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="STM32 binary serial link test")
     p.add_argument("--port", default="/dev/ttyACM0", help="Serial port (e.g. /dev/ttyUSB0)")
     p.add_argument("--baud", type=int, default=115200, help="UART baud rate")
-    p.add_argument("--mode", type=int, default=MODE_IDLE, choices=[0, 1, 2, 3, 4], help="Control mode")
+    p.add_argument("--mode", type=int, default=MODE_IDLE, choices=[0, 4], help="Control mode")
     p.add_argument("--u", type=float, default=0.0, help="Constant control effort in [-1,1]")
     p.add_argument("--tx-hz", type=float, default=100.0, help="Command transmit rate")
     p.add_argument("--sine", action="store_true", help="Send sinusoidal control effort")

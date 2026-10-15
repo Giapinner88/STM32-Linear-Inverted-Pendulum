@@ -108,7 +108,7 @@ static void Comms_ParseByte(uint8_t b)
         }
 
         g_latest_cmd.control_effort = pkt.control_effort;
-        g_latest_cmd.mode = (pkt.mode <= CONTROL_MODE_FULL) ? (ControlMode)pkt.mode : CONTROL_MODE_IDLE;
+        g_latest_cmd.mode = (pkt.mode == CONTROL_MODE_FULL) ? CONTROL_MODE_FULL : CONTROL_MODE_IDLE;
         g_latest_cmd.seq = pkt.seq;
         g_latest_cmd.timestamp_ms = HAL_GetTick();
         g_latest_cmd.is_fresh = 1U;

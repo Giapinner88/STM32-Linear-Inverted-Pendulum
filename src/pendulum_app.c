@@ -6,11 +6,10 @@
 #include "cartpole_safety.h"
 #include "comms.h"
 #include "delay.h"
-#include "hybrid_controller.h"
+#include "drive_state.h"
 #include "motor.h"
 #include "pendulum_sequence.h"
 #include "pendulum_ui.h"
-#include "swingup_controller.h"
 
 #include <math.h>
 
@@ -50,7 +49,7 @@ static uint8_t g_last_cmd_seq = 0U;
 static uint8_t g_rail_blocked = 0U;
 static int32_t g_control_center_enc = 0;
 static uint8_t g_control_center_valid = 0U;
-static HybridController g_controller;
+static DriveState g_controller;
 static PendulumSequence g_sequence;
 
 extern ADC_HandleTypeDef hadc1;
@@ -232,7 +231,7 @@ static void StopAutomaticSequence(void)
   g_calibration_mode = 1U;
   g_run_enabled = 0U;
   g_curr_u = 0.0f;
-  HybridController_Reset(&g_controller);
+  DriveState_Reset(&g_controller);
   Motor_Stop();
 }
 
@@ -243,7 +242,7 @@ static void StartAutomaticCalibration(void)
   g_run_enabled = 0U;
   g_control_center_valid = 0U;
   g_curr_u = 0.0f;
-  HybridController_Reset(&g_controller);
+  DriveState_Reset(&g_controller);
   Motor_Stop();
 }
 
@@ -259,13 +258,13 @@ static void UpdateAutomaticCalibration(void)
     g_calibration_mode = 0U;
     g_run_enabled = 1U;
     g_curr_u = 0.0f;
-    HybridController_Reset(&g_controller);
+    DriveState_Reset(&g_controller);
     ResetMotionEstimates();
   } else if (event == PENDULUM_SEQUENCE_EVENT_CAL_TIMEOUT) {
     g_calibration_mode = 1U;
     g_run_enabled = 0U;
     g_curr_u = 0.0f;
-    HybridController_Reset(&g_controller);
+    DriveState_Reset(&g_controller);
     Motor_Stop();
   }
 }
@@ -279,7 +278,7 @@ static void SetCalibrationMode(uint8_t enabled)
   g_run_enabled = 0U;
   g_curr_u = 0.0f;
   g_rail_blocked = 0U;
-  HybridController_Reset(&g_controller);
+  DriveState_Reset(&g_controller);
   Motor_Stop();
 }
 
@@ -292,7 +291,7 @@ static void StartRightWallHoming(void)
   g_run_enabled = 1U;
   g_curr_u = 0.0f;
   g_rail_blocked = 0U;
-  HybridController_Reset(&g_controller);
+  DriveState_Reset(&g_controller);
 }
 
 static float ComputeRightWallHomeU(int32_t encoder_position)
@@ -335,7 +334,7 @@ static PendulumUiMode GetUiMode(uint8_t remote_active)
   }
   if ((g_sequence.state == PENDULUM_SEQUENCE_RUNNING)
       || ((remote_active != 0U) && (g_run_enabled != 0U))) {
-    return (HybridController_IsCaptured(&g_controller) != 0U)
+    return (DriveState_IsCaptured(&g_controller) != 0U)
          ? PENDULUM_UI_BALANCE : PENDULUM_UI_SWINGUP;
   }
   return PENDULUM_UI_IDLE;
@@ -347,7 +346,7 @@ static void RenderUi(uint8_t remote_active)
 
   snapshot.mode = GetUiMode(remote_active);
   snapshot.remote_active = remote_active;
-  snapshot.capture_active = HybridController_IsCaptured(&g_controller);
+  snapshot.capture_active = DriveState_IsCaptured(&g_controller);
   snapshot.remote_mode = (uint8_t)g_remote_mode;
   snapshot.angle_adc = g_curr_adc;
   snapshot.angle_zero_adc = g_angle_zero_adc;
@@ -381,7 +380,7 @@ void PendulumApp_Init(void)
 
   g_curr_enc = (int32_t)(int16_t)__HAL_TIM_GET_COUNTER(&htim4);
   g_prev_enc_raw = (uint16_t)__HAL_TIM_GET_COUNTER(&htim4);
-  HybridController_Init(&g_controller);
+  DriveState_Init(&g_controller);
   PendulumSequence_Init(&g_sequence);
   Comms_Init(&huart1);
   PendulumUi_ShowStartup();
@@ -403,7 +402,7 @@ static void ReadSensors(void)
   g_curr_enc += (int32_t)encoder_delta;
 
   UpdateRateEstimates(HAL_GetTick());
-  HybridController_UpdateCapture(&g_controller, g_curr_theta_rad,
+  DriveState_UpdateCapture(&g_controller, g_curr_theta_rad,
                                   g_filt_dtheta_rad_s);
 }
 
@@ -418,14 +417,16 @@ static void PollRemoteCommand(void)
                : 0.0f;
     g_remote_miss_frames = 0U;
     g_last_cmd_seq = command.seq;
-    if (((command.mode == CONTROL_MODE_DIRECT)
-         || (command.mode == CONTROL_MODE_FULL))
+    if ((command.mode == CONTROL_MODE_FULL)
         && (isfinite(command.control_effort) != 0)) {
       g_direct_mode = command.mode;
       g_direct_u = g_remote_u;
       g_direct_age_frames = 0U;
       return;
     }
+    /* IDLE, unsupported modes and non-finite commands revoke the old command. */
+    g_direct_age_frames = 0xFFFFU;
+    g_direct_u = 0.0f;
   }
   if (g_remote_miss_frames < 0xFFFFU) {
     g_remote_miss_frames++;
@@ -499,48 +500,17 @@ static void HandleReservedKey(void)
 static void StopDrive(void)
 {
   g_curr_u = 0.0f;
-  HybridController_Reset(&g_controller);
+  DriveState_Reset(&g_controller);
   Motor_Stop();
 }
 
-static float ComputeHybridCommand(void)
+/* The laptop owns all control phases. An expired command stops the drive;
+ * capture remains telemetry/slew state only, never a controller switch. */
+static uint8_t HasFreshNmpcCommand(void)
 {
-  return HybridController_Compute(
-    &g_controller, (float)GetCartPositionFromControlCenter(),
-    g_curr_x_vel, g_curr_theta_rad, g_filt_dtheta_rad_s);
-}
-
-/* A fresh laptop command replaces the on-board one: in FULL mode in every
- * phase, in DIRECT mode only while the pendulum is captured. The on-board
- * hybrid controller keeps running so it can take over at once when the
- * command goes stale. */
-static float ComputeSequenceCommand(void)
-{
-  float local_command = ComputeHybridCommand();
-  uint8_t laptop_owns = (g_direct_mode == CONTROL_MODE_FULL)
-                      || (HybridController_IsCaptured(&g_controller) != 0U);
-
-  g_direct_in_use = 0U;
-  if ((laptop_owns != 0U)
+  return ((g_direct_mode == CONTROL_MODE_FULL)
       && (g_direct_age_frames
-          <= (CARTPOLE_DIRECT_TIMEOUT_MS / CARTPOLE_CONTROL_PERIOD_MS))) {
-    g_direct_in_use = 1U;
-    return g_direct_u;
-  }
-  return local_command;
-}
-
-static float ComputeRemoteCommand(void)
-{
-  if (g_remote_mode == CONTROL_MODE_SWINGUP) {
-    return HybridController_ComputeSwingup(
-      &g_controller, (float)GetCartPositionFromControlCenter(),
-      g_curr_x_vel, g_curr_theta_rad, g_filt_dtheta_rad_s);
-  }
-  if (g_remote_mode == CONTROL_MODE_LQR) {
-    return ComputeHybridCommand();
-  }
-  return g_remote_u;
+          <= (CARTPOLE_DIRECT_TIMEOUT_MS / CARTPOLE_CONTROL_PERIOD_MS))) ? 1U : 0U;
 }
 
 /* Jog buttons move the cart only while nothing else owns the motor.
@@ -554,10 +524,10 @@ static uint8_t UpdateJog(void)
 
   if (plus_held == minus_held) {
     g_curr_u = 0.0f;
-    HybridController_Reset(&g_controller);
+    DriveState_Reset(&g_controller);
     return 0U;
   }
-  g_curr_u = HybridController_ApplySlew(
+  g_curr_u = DriveState_ApplySlew(
     &g_controller, (plus_held != 0U) ? CARTPOLE_JOG_U : -CARTPOLE_JOG_U);
   return 1U;
 }
@@ -574,7 +544,7 @@ static uint8_t SelectControllerCommand(uint8_t remote_active)
       StopDrive();
       return 0U;
     }
-    g_curr_u = HybridController_ApplySlew(
+    g_curr_u = DriveState_ApplySlew(
       &g_controller, ComputeRightWallHomeU(g_curr_enc));
     return 1U;
   }
@@ -588,15 +558,17 @@ static uint8_t SelectControllerCommand(uint8_t remote_active)
   }
 
   if (remote_active != 0U) {
-    g_run_enabled = ((g_remote_mode == CONTROL_MODE_SWINGUP)
-                     || (g_remote_mode == CONTROL_MODE_LQR)) ? 1U : 0U;
+    g_run_enabled = 0U;  /* Commands cannot bypass the USER start sequence. */
   } else {
     g_run_enabled = (g_sequence.state == PENDULUM_SEQUENCE_RUNNING) ? 1U : 0U;
   }
   if (g_run_enabled != 0U) {
-    g_curr_u = HybridController_ApplySlew(
-      &g_controller, (remote_active != 0U) ? ComputeRemoteCommand()
-                                           : ComputeSequenceCommand());
+    if (HasFreshNmpcCommand() == 0U) {
+      StopDrive();  /* Immediate output zero, not a slew toward zero. */
+      return 1U;
+    }
+    g_direct_in_use = 1U;
+    g_curr_u = DriveState_ApplySlew(&g_controller, g_direct_u);
     return 1U;
   }
 
@@ -646,7 +618,7 @@ static void PublishTelemetry(void)
   telemetry.control_effort = g_curr_u;
   telemetry.frame = (uint16_t)g_frame_count;
   telemetry.flags = (uint8_t)(
-    ((HybridController_IsCaptured(&g_controller) != 0U)
+    ((DriveState_IsCaptured(&g_controller) != 0U)
        ? TELEMETRY_FLAG_CAPTURED : 0U)
     | ((g_run_enabled != 0U) ? TELEMETRY_FLAG_RUNNING : 0U)
     | ((g_rail_blocked != 0U) ? TELEMETRY_FLAG_RAIL_BLOCKED : 0U)

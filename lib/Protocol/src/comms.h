@@ -9,11 +9,7 @@ extern "C" {
 
 typedef enum {
   CONTROL_MODE_IDLE = 0,
-  CONTROL_MODE_SWINGUP = 1,
-  CONTROL_MODE_LQR = 2,
-  /* Laptop supplies u; only honoured while the on-board controller reports
-   * the pendulum captured, with a short timeout back to local LQR. */
-  CONTROL_MODE_DIRECT = 3,
+  /* Wire IDs 1..3 are retired; do not renumber FULL. */
   /* Laptop supplies u in every phase (swing-up, capture, balance) while the
    * automatic sequence is running. */
   CONTROL_MODE_FULL = 4

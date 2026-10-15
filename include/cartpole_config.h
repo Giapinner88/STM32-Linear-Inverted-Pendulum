@@ -9,8 +9,7 @@
 #define CARTPOLE_LED_TOGGLE_SAMPLES CARTPOLE_MS_TO_SAMPLES(200U)
 #define CARTPOLE_OLED_PERIOD_MS 80U
 #define CARTPOLE_COMMAND_TIMEOUT_MS 250U
-/* Laptop-supplied balance command: older than this and the on-board LQR
- * takes over again. */
+/* Laptop command age limit; stale commands stop the motor. */
 #define CARTPOLE_DIRECT_TIMEOUT_MS 30U
 #define CARTPOLE_PI_F 3.1415926f
 #define CARTPOLE_ANGLE_ADC_AVERAGE_SAMPLES 10U
@@ -37,8 +36,7 @@
 #define CARTPOLE_CAPTURE_EXIT_ANGLE_RAD 0.45f
 #define CARTPOLE_CAPTURE_ENTER_RATE_RAD_S 3.5f
 #define CARTPOLE_CAPTURE_EXIT_RATE_RAD_S 7.0f
-/* LQR only recovers without running off the rail when the angle predicted
- * LEAD_S ahead (theta + LEAD_S * theta_dot) is small. */
+/* Inherited capture classifier for telemetry and slew selection only. */
 #define CARTPOLE_CAPTURE_LEAD_S 0.20f
 #define CARTPOLE_CAPTURE_ENTER_PREDICT_RAD 0.25f
 #define CARTPOLE_CAPTURE_ENTER_SAMPLES CARTPOLE_MS_TO_SAMPLES(10U)
@@ -53,25 +51,6 @@
 #define CARTPOLE_ENCODER_HALF_TRAVEL_TICKS (CARTPOLE_ENCODER_TRAVEL_TICKS / 2)
 #define CARTPOLE_ENCODER_METERS_PER_TICK \
   ((0.036f * CARTPOLE_PI_F) / 1040.0f)
-
-/* Energy-shaping swing-up. */
-#define CARTPOLE_SWINGUP_MAX_U (6900.0f / 7199.0f)
-#define CARTPOLE_SWINGUP_PHASE_HYST_RAD_S 0.45f
-#define CARTPOLE_SWINGUP_SUPPLY_VOLTAGE 12.0f
-#define CARTPOLE_SWINGUP_WINDOW_HALF_TICKS 1700
-#define CARTPOLE_SWINGUP_RETURN_EXIT_HALF_TICKS 1100
-#define CARTPOLE_SWINGUP_RETURN_MAX_U (6900.0f / 7199.0f)
-#define CARTPOLE_SWINGUP_RETURN_MIN_U 0.80f
-#define CARTPOLE_SWINGUP_RETURN_K_X 0.00020f
-#define CARTPOLE_SWINGUP_RETURN_K_V 0.00180f
-
-/* 40 cm LQR ported from the supplied Wheeltec reference firmware. */
-#define CARTPOLE_LQR_K_X (-36.4232f)
-#define CARTPOLE_LQR_K_DX (-40.0996f)
-#define CARTPOLE_LQR_K_THETA (-101.4914f)
-#define CARTPOLE_LQR_K_DTHETA (-15.8376f)
-#define CARTPOLE_LQR_SUPPLY_VOLTAGE 12.0f
-#define CARTPOLE_LQR_MAX_U (6900.0f / 7199.0f)
 
 /* Actuation, homing and local controls. */
 /* Swing-up keeps the 22.5 /s rate that was tuned at 20 ms. */

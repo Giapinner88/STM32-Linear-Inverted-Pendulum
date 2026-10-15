@@ -101,6 +101,41 @@ Biến trở không phủ đủ 360°: với điểm 0 lấy ở vị trí buôn
 là $\pi + 0.127$ rad (`CARTPOLE_UPRIGHT_OFFSET_RAD`). Khi chưa có offset này, LQR
 giữ con lắc nghiêng khoảng 8° nên xe phải tăng tốc liên tục và lao vào ray.
 
+### Số đo góc hỏng khi con lắc quay nhanh qua điểm vòng ADC (từ `logs/laptop_*.csv`)
+
+Điểm mà ADC vòng từ 4095 về 0 nằm ở khoảng −89° so với tư thế buông (gần nằm
+ngang). Khi con lắc quay nhanh qua đó, số đo bị hỏng:
+
+- trong 278 lần qua (trên 4 rad/s), chỉ 3% sạch; còn lại số đo đứng yên vài frame
+  (luôn ở ADC 0–50) và/hoặc nhảy $\pm 2.6$ rad rồi nhảy ngược lại ở frame sau;
+- ước lượng tốc độ của firmware vọt tới $\pm 60$ rad/s (tối đa 276 rad/s), trong
+  khi con lắc thật không quay quá khoảng 15 rad/s;
+- tại điểm vòng 41.9% frame bị lặp, so với 0.92% ở mọi góc khác (mức nền, không
+  theo nhịp OLED hay LED);
+- độ dài đoạn đứng yên giảm theo tốc độ nhưng không như một khe góc cố định; khớp
+  tốt nhất với khoảng 1.5 frame (≈ 8 ms) cố định cộng khoảng 2° góc;
+- thang đo là $(\pi + 0.127)/\pi \approx 1.040$ rad đọc cho mỗi rad thật.
+
+**Cơ chế chưa xác định.** Có thể là ADC lấy trung bình 10 mẫu rơi hai bên điểm
+vòng, một đoạn chết thật của biến trở, hoặc độ trễ trong đường đo; log chỉ có giá
+trị đã lấy trung bình nên không phân biệt được. Cần ghi ADC thô vào telemetry rồi
+quay con lắc bằng tay thật chậm qua điểm đó. Ước lượng trước đây "vùng chết 10–14°"
+dựa trên số frame đứng yên và đã được sửa lại như trên.
+
+Khi con lắc đứng yên hoặc dao động nhỏ thì không ảnh hưởng: ở mọi log, giai đoạn
+LQR (đã bắt được con lắc) có 0 frame nhiễu và 0% thời gian gần điểm vòng, còn
+swing-up của mọi bộ điều khiển có 3–95 frame nhiễu mỗi lượt. Mô hình con lắc vẫn
+tốt (sai khoảng 1.5° sau 60 ms trên các đoạn không dính điểm vòng); sai số tới 18°
+chỉ ở khoảng 45% cửa sổ có dính điểm vòng. Observer cũ (đã lưu trữ, không còn trong
+runtime từ 2026-10-15) tích phân mô hình qua đoạn đó; trong MuJoCo với mô hình cảm biến dựng
+từ log, NMPC thuần giảm từ 8/8 xuống 2/8 lượt bắt khi thiếu nó và trở lại 8/8 khi
+có. Mô hình cảm biến đó là xấp xỉ của tôi nên chưa chắc khớp cơ chế thật.
+
+Các số liệu observer phía trên thuộc cấu hình cũ, không mô tả NMPC hiện tại.
+Runtime hiện dùng góc pot và bộ lọc vận tốc firmware, với upright warm-start repair;
+không còn cờ `--observer`/`--no-observer`. Xem `nmpc/README.md` để chạy và khôi phục
+mã observer đã lưu trữ nếu cần đối chiếu lịch sử.
+
 ---
 
 ## LQR Gains (từ source code gốc, $L = 390$ mm)
